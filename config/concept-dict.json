@@ -1,0 +1,238 @@
+{
+  "event": {
+    "target": "id_tbl",
+    "sources": {
+      "miiv": [
+        {
+          "table": "admissions",
+          "index1_var": "dischtime",
+          "val_var": "hospital_expire_flag",
+          "index2_var": "deathtime",
+          "class": "col_itm",
+          "callback": "miiv_event"
+        }
+      ],
+      "anzics": [
+        {
+          "table": "main",
+          "val_var": "DIED_HOSP",
+          "idx_var": "ICU_AD_DTM",
+          "idx_var2": "HOSP_DS_DTM",
+          "idx_var3": "ICU_DS_DTM",
+          "val_var2": "APDDeathDate",
+          "val_var3": "NDI_NHI_DeathDate",
+          "class": "col_itm",
+          "callback": "anzics_event"
+        }
+      ]
+    }
+  },
+  "event_time": {
+    "target": "id_tbl",
+    "sources": {
+      "miiv": [
+        {
+          "table": "admissions",
+          "index1_var": "dischtime",
+          "val_var": "hospital_expire_flag",
+          "index2_var": "deathtime",
+          "class": "col_itm",
+          "callback": "miiv_event_time"
+        }
+      ],
+      "anzics": [
+        {
+          "table": "main",
+          "val_var": "DIED_HOSP",
+          "idx_var": "ICU_AD_DTM",
+          "idx_var2": "HOSP_DS_DTM",
+          "idx_var3": "ICU_DS_DTM",
+          "val_var2": "APDDeathDate",
+          "val_var3": "NDI_NHI_DeathDate",
+          "class": "col_itm",
+          "callback": "anzics_event_time"
+        }
+      ]
+    }
+  },
+  "hosp_episode": {
+    "target": "id_tbl",
+    "sources": {
+      "anzics": [
+        {
+          "table": "main",
+          "val_var": "PatientID",
+          "add_var": "AdmEpisode",
+          "year_var": "IcuAdmitYYYY",
+          "site_var": "DSITEID",
+          "adm_var": "ICU_AD_DTM",
+          "class": "col_itm",
+          "callback": "anzics_hosp_epi_cb"
+        }
+      ],
+      "miiv": [
+        {
+          "table": "icustays",
+          "val_var": "hadm_id",
+          "add_var": "subject_id",
+          "class": "col_itm",
+          "callback": "miiv_hosp_epi_cb"
+        }
+      ]
+    }
+  },
+  "icu_adm_date": {
+    "target": "id_tbl",
+    "sources": {
+      "anzics": [
+        {
+          "table": "main",
+          "val_var": "DIED_HOSP",
+          "add_var": "ICU_AD_DTM",
+          "class": "col_itm",
+          "callback": "anzics_dtm"
+        }
+      ]
+    }
+  },
+  "postcode": {
+    "target": "id_tbl",
+    "sources": {
+      "anzics": [
+        {
+          "table": "main",
+          "val_var": "postcode",
+          "class": "col_itm"
+        }
+      ]
+    }
+  },
+  "irsad": {
+    "target": "id_tbl",
+    "sources": {
+      "anzics": [
+        {
+          "table": "main",
+          "val_var": "postcode",
+          "class": "col_itm",
+          "callback": "anzics_irsad_cb"
+        }
+      ]
+    }
+  },
+  "diab": {
+    "target": "id_tbl",
+    "sources": {
+      "anzics": [
+        {
+          "table": "main",
+          "val_var": "DIABETES",
+          "class": "col_itm",
+          "callback": "anzics_diab_cb"
+        }
+      ]
+    }
+  },
+  "sofa_anz": {
+    "target": "id_tbl",
+    "sources": {
+      "anzics": [
+        {
+          "table": "main",
+          "val_var": "sofa_score_derived",
+          "class": "col_itm"
+        }
+      ]
+    }
+  },
+  "aids": {
+    "target": "id_tbl",
+    "sources": {
+      "anzics": [
+        {
+          "table": "main",
+          "val_var": "AIDS",
+          "class": "col_itm"
+        }
+      ]
+    }
+  },
+  "hep_fail": {
+    "target": "id_tbl",
+    "sources": {
+      "anzics": [
+        {
+          "table": "main",
+          "val_var": "HEPFAIL",
+          "class": "col_itm"
+        }
+      ]
+    }
+  },
+  "lymphoma": {
+    "target": "id_tbl",
+    "sources": {
+      "anzics": [
+        {
+          "table": "main",
+          "val_var": "LYMPHOMA",
+          "class": "col_itm"
+        }
+      ]
+    }
+  },
+  "leuk_or_mye": {
+    "target": "id_tbl",
+    "sources": {
+      "anzics": [
+        {
+          "table": "main",
+          "val_var": "LEUKAEM",
+          "class": "col_itm"
+        }
+      ]
+    }
+  },
+  "metast": {
+    "target": "id_tbl",
+    "sources": {
+      "anzics": [
+        {
+          "table": "main",
+          "val_var": "METAST",
+          "class": "col_itm"
+        }
+      ]
+    }
+  },
+  "immunosup": {
+    "target": "id_tbl",
+    "sources": {
+      "anzics": [
+        {
+          "table": "main",
+          "val_var": "IMMUNSUP",
+          "class": "col_itm"
+        }
+      ]
+    }
+  },
+  "cirrhosis": {
+    "target": "id_tbl",
+    "sources": {
+      "anzics": [
+        {
+          "table": "main",
+          "val_var": "CIRRHOS",
+          "class": "col_itm"
+        }
+      ]
+    }
+  },
+  "anz_cmb": {
+    "class": "rec_cncpt",
+    "target": "id_tbl",
+    "concepts": ["aids", "hep_fail", "lymphoma", "metast", "leuk_or_mye", "immunosup", "cirrhosis"],
+    "callback": "anzics_cmb_cb"
+  }
+}
