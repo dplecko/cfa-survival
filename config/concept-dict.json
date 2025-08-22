@@ -55,6 +55,69 @@
       ]
     }
   },
+  "readm_epi": {
+    "target": "id_tbl",
+    "sources": {
+      "anzics": [
+        {
+          "table": "main",
+          "val_var": "PatientID",
+          "site_var": "DSITEID",
+          "adm_var": "ICU_AD_DTM",
+          "class": "col_itm",
+          "callback": "anzics_readm_epi"
+        }
+      ]
+    }
+  },
+  "readm_time": {
+    "target": "id_tbl",
+    "sources": {
+      "anzics": [
+        {
+          "table": "main",
+          "val_var": "PatientID",
+          "site_var": "DSITEID",
+          "adm_var": "ICU_AD_DTM",
+          "val_var2": "APDDeathDate",
+          "val_var3": "NDI_NHI_DeathDate",
+          "class": "col_itm",
+          "callback": "anzics_readm_time"
+        }
+      ]
+    }
+  },
+  "death_time": {
+    "target": "id_tbl",
+    "sources": {
+      "anzics": [
+        {
+          "table": "main",
+          "val_var": "DIED_HOSP",
+          "adm_var": "ICU_AD_DTM",
+          "idx_var2": "HOSP_DS_DTM",
+          "idx_var3": "ICU_DS_DTM",
+          "val_var2": "APDDeathDate",
+          "val_var3": "NDI_NHI_DeathDate",
+          "class": "col_itm",
+          "callback": "anzics_death_time"
+        }
+      ]
+    }
+  },
+  "censor_time": {
+    "target": "id_tbl",
+    "sources": {
+      "anzics": [
+        {
+          "table": "main",
+          "val_var": "ICU_AD_DTM",
+          "class": "col_itm",
+          "callback": "anzics_censor_time"
+        }
+      ]
+    }
+  },
   "hosp_episode": {
     "target": "id_tbl",
     "sources": {
@@ -66,6 +129,7 @@
           "year_var": "IcuAdmitYYYY",
           "site_var": "DSITEID",
           "adm_var": "ICU_AD_DTM",
+          "hadm_var": "HOSP_AD_DTM",
           "class": "col_itm",
           "callback": "anzics_hosp_epi_cb"
         }

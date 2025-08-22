@@ -205,7 +205,9 @@ chf_rfs_cf <- function(data, X, time_var, event_var, rhs, time_interest,
     
     # training weights
     gwt <- if (balance_groups) ifelse(trn[[X]], wt1, wt0) else rep(1, nrow(trn))
-    obj <- rfsrc(frml, data = trn, ntime = time_interest, case.wt = gwt)
+    gsize <- if (balance_groups) 2 * min(table(trn[[X]])) else nrow(trn)
+    obj <- rfsrc(frml, data = trn, ntime = time_interest, case.wt = gwt,
+                 samptype = "swr", sampsize = gsize)
     
     preds <- predict(obj, newdata = val)
     preds_x0 <- predict(obj, newdata = val_x0)

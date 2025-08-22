@@ -1,9 +1,10 @@
 
-load_data <- function(src, outcome = "death", 
+load_data <- function(src, outcome = c("death", "dcr", "readm"), 
                       split_elective = FALSE, one_hot = FALSE, 
                       no_miss = TRUE, quick = FALSE) {
   
   src <- match.arg(src, c("miiv", "anzics", "aics", "nzics", "mimic_demo"))
+  outcome <- match.arg(outcome, c("death", "dcr", "readm"))
   
   root <- rprojroot::find_root(rprojroot::has_file(".gitignore"))
   fl_path <- file.path(root, "data", paste0("dat-", src, "-", outcome, ".RData"))
@@ -15,36 +16,68 @@ load_data <- function(src, outcome = "death",
     
     if (is.element(src, c("anzics", "aics", "nzics"))) {
       
-      sel_coh <- load_concepts(c("adm_episode", "hosp_episode", "age", "adm_year", 
-                                 "event", "event_time"), "anzics", verbose = FALSE)
+      sel_coh <- load_concepts(c("readm_epi", "age", "adm_year"), "anzics", 
+                               verbose = FALSE)
+      patient_ids <- id_col(sel_coh[readm_epi == 1 & age >= 18 & adm_year >= 2023])
+      
+      ev_dat <- load_concepts(c("death_time", "readm_time", "censor_time", "readm_epi"), 
+                              "anzics", verbose = FALSE)
+      ev_dat <- ev_dat[get(id_vars(ev_dat)) %in% patient_ids] #' *do not change*
       
       if (outcome == "death") {
         
-        patient_ids <- id_col(sel_coh[adm_episode %in% c(0, 1) & age >= 18 &
-                                      adm_year >= 2023])
+        # if death is NA, censoring kicked in 
+        ev_dat[is.na(death_time), event_time := censor_time]
+        ev_dat[is.na(death_time), event := 0]
         
-      } else if (outcome == "readm") {
+        # if censoring time smaller, still censored
+        ev_dat[!is.na(death_time) & censor_time < death_time, event_time := censor_time]
+        ev_dat[!is.na(death_time) & censor_time < death_time, event := 0]
         
-        patient_ids <- id_col(
-          sel_coh[(adm_episode %in% c(0, 1)) & (hosp_episode %in% c(0, 1)) & 
-                    age >= 18 & adm_year >= 2018 & (death != TRUE)]
-        )
+        # where death_time exists and is smaller than 
+        ev_dat[!is.na(death_time) & censor_time >= death_time, event_time := death_time]
+        ev_dat[!is.na(death_time) & censor_time >= death_time, event := 1]
         
-        readm <- sel_coh[, c(meta_vars(sel_coh), "hosp_episode"), with = FALSE]
+      } else {
+        
+        to_event <- function(a, b, c) {
+          
+          event <- event_time <- 0
+          b[is.na(b)] <- Inf
+          c[is.na(c)] <- Inf
+          
+          idx_a <- a < b & a < c
+          idx_b <- !idx_a & b < c
+          idx_c <- c <= b & !idx_a 
+          
+          event[idx_a] <- 0
+          event_time[idx_a] <- a[idx_a]
+          
+          event[idx_b] <- 1
+          event_time[idx_b] <- b[idx_b]
+          
+          event[idx_c] <- 2
+          event_time[idx_c] <- c[idx_c]
+          
+          list(event = event, event_time = event_time)
+        }
+        
+        ev_dat[, c("event", "event_time") := to_event(censor_time, death_time, readm_time)]
       }
       
-      dat <- load_concepts(c("event", "event_time", "age", "country", 
-                             "apache_iii_rod", "apache_iii_diag", "sex", "indig", 
+      # swap event = 1 with event = 2 for readm case  
+      if (outcome == "readm") ev_dat[event > 0, event := 3 - event]
+      
+     
+      
+      ev_dat[, c("censor_time", "death_time", "readm_time", "readm_epi") := NULL]
+
+      dat <- load_concepts(c("age", "country", "apache_iii_rod", 
+                             "apache_iii_diag", "sex", "indig", 
                              "elective", "frailty", "anz_cmb", "adm_diag", 
                              "irsad"), "anzics", 
                            patient_ids = patient_ids, verbose = FALSE)
-      
-      if (outcome == "readm") {
-        
-        dat <- merge(dat, readm, all.x = TRUE)
-        dat[, readm := hosp_episode]
-        dat[, c("hosp_episode") := NULL]
-      }
+      dat <- merge(dat, ev_dat)
       
       dat[, sex := as.integer(sex == "Male")]
       dat[, majority := 1 - indig]

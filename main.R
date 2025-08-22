@@ -11,9 +11,10 @@ invisible(lapply(list.files(file.path(root, "r"), full.names = TRUE),
 
 # select data source
 src <- "aics"
+out <- "death" # "dcr", "readm"
 
 # prepare the data and the SFM
-dat <- load_data("aics")
+dat <- load_data("aics", outcome = out)
 c(X, Z, W, event_var, time_var) %<-% attr(dat, "sfm")
 
 set.seed(2026)
@@ -21,12 +22,8 @@ set.seed(2026)
 # for testing
 local <- FALSE
 if (local) {
-  
-  dat_run <- rbind(
-    dat[majority == 0],
-    dat[sample(which(dat$majority == 1), size = sum(dat$majority == 0))]
-  )
-  # dat_run <- dat[sample.int(nrow(dat), size = 10000, replace=FALSE)]
+
+  dat_run <- dat[sample.int(nrow(dat), size = 10000, replace=FALSE)]
   nboot <- 3
 } else {
   
@@ -36,12 +33,16 @@ if (local) {
 
 fsurv <- fair_surv(dat_run, X, Z, W, time_var, event_var, 
                    method = "rfs-cf", nboot = nboot,
-                   balance_groups = TRUE)
+                   balance_groups = TRUE,
+                   copula = if (out == "readm") "frank" else NULL,
+                   tau_grid = if (out == "readm") c(0.1, 0.5, 0.8) else NULL)
 
-if (!local) save(fsurv, file = paste0("data/", src, "_fsurvb.RData"))
+if (!local) 
+  save(fsurv, file = paste0("data/", src, "_fsurv_", out, ".RData"))
 
-# load(paste0("data/", src, "_fsurvb.RData"))
+# load(paste0("data/", src, "_fsurv_", out, ".RData"))
 
+# the local analyses need to be adapted!
 if (local) {
   
   ### paper plots:
@@ -120,7 +121,6 @@ if (local) {
   ggsave("results/chf-ratio.png", width = 6, height = 4)
 }
 
-
 #' # marginal survival curves: what happens? (underestimation?)
 #' sfit <- survfit(Surv(event_time, event) ~ 1, data = dat)
 #' 
@@ -129,18 +129,18 @@ if (local) {
 #' #' * Kaplan-Meier vs. RSF marginal fit has a gap of about 0.16% *
 #' 
 #' # what happens group-wise?
-#' sfit <- survfit(Surv(event_time, event) ~ majority, data = dat)
-#' km_dt <- data.table(
-#'   surv = sfit$surv, time = sfit$time, 
-#'   majority = c(rep(0, sfit$strata[1]), rep(1, sfit$strata[2]))
-#' )
-#' 
-#' rf_dt <- rbind(
-#'   data.table(surv = colMeans(fsurv$srv$srvx[dat$majority == 0, ]), 
-#'              time = fsurv$time_interest, majority = 0),
-#'   data.table(surv = colMeans(fsurv$srv$srvx[dat$majority == 1, ]), 
-#'              time = fsurv$time_interest, majority = 1)
-#' )
+sfit <- survfit(Surv(event_time, event) ~ majority, data = dat)
+km_dt <- data.table(
+  surv = sfit$surv, time = sfit$time,
+  majority = c(rep(0, sfit$strata[1]), rep(1, sfit$strata[2]))
+)
+# 
+rf_dt <- rbind(
+  data.table(surv = colMeans(fsurv$srv$srvx[dat$majority == 0, ]),
+             time = fsurv$time_interest, majority = 0),
+  data.table(surv = colMeans(fsurv$srv$srvx[dat$majority == 1, ]),
+             time = fsurv$time_interest, majority = 1)
+)
 #' 
 #' rfw_dt <- rbind(
 #'   data.table(surv = colMeans(fsurv$srv$srvx[dat_run$majority == 0, ]), 
@@ -149,16 +149,17 @@ if (local) {
 #'              time = fsurv2$time_interest, majority = 1)
 #' )
 #' 
-#' ggplot(rbind(km_dt[, method := "KM"], rf_dt[, method := "RF"],
-#'              rfw_dt[, method := "RF-rw"]), 
-#'        aes(x=time, y=surv, color = factor(majority), linetype = factor(method))) + 
-#'   geom_line(linewidth=1) + theme_bw() +
-#'   coord_cartesian(xlim=c(0, 500), ylim = c(0.89, 0.95)) +
-#'   scale_color_discrete(name = "Majority") +
-#'   scale_linetype_manual(name = "Inference Method", 
-#'                         values = c("solid", "dashed", "dotted")) +
-#'   theme(legend.position = "inside", legend.position.inside = c(0.65, 0.65),
-#'         legend.box.background = element_rect())
+ggplot(rbind(km_dt[, method := "KM"], rf_dt[, method := "RF"]#,
+             #rfw_dt[, method := "RF-rw"]
+             ),
+       aes(x=time, y=surv, color = factor(majority), linetype = factor(method))) +
+  geom_line(linewidth=1) + theme_bw() +
+  coord_cartesian(xlim=c(0, 500), ylim = c(0.89, 0.95)) +
+  scale_color_discrete(name = "Majority") +
+  scale_linetype_manual(name = "Inference Method",
+                        values = c("solid", "dashed", "dotted")) +
+  theme(legend.position = "inside", legend.position.inside = c(0.65, 0.65),
+        legend.box.background = element_rect())
 #' 
 #' 
 #' ggplot(
