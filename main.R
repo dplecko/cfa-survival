@@ -13,7 +13,7 @@ invisible(lapply(list.files(file.path(root, "r"), full.names = TRUE),
 src <- "aics"
 out <- "death" # "dcr", "readm"
 balance <- FALSE
-splitf <- TRUE
+splitf <- FALSE
 
 # prepare the data and the SFM
 dat <- load_data("aics", outcome = out)
@@ -39,18 +39,16 @@ fsurv <- fair_surv(dat_run, X, Z, W, time_var, event_var,
                    split_forest = splitf,
                    copula = if (out == "readm") "frank" else NULL,
                    tau_grid = if (out == "readm") c(0.1, 0.5, 0.8) else NULL,
-                   nodesize = 50)
+                   nodesize = 100)
 
 if (!local) 
-  save(fsurv, file = fname(src, out, balance, splitf))
+  save(fsurv, file = file.path("data", fname(src, out, balance, splitf)))
 
 # load(file.path("data", fname(src, out, balance, splitf)))
 
 # the local analyses need to be adapted!
 save <- FALSE
 if (local) {
-
-  ### paper plots:
 
   # (A) Kaplan-Meier Survival Curve Estimates
   km_curves(dat_run)

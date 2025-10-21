@@ -38,7 +38,6 @@ tv_comparison <- function(fsurv, data) {
     Majority = factor(c(rep(0, sfit$strata[1]), rep(1, sfit$strata[2])))
   )
   
-  browser()
   ggplot(
     fsurv$measures[effect == "tv" & scale == "surv"],
     aes(x = time_interest, y = value)
