@@ -18,7 +18,7 @@ load_data <- function(src, outcome = c("death", "dcr", "readm"),
       
       sel_coh <- load_concepts(c("readm_epi", "age", "adm_year"), "anzics", 
                                verbose = FALSE)
-      patient_ids <- id_col(sel_coh[readm_epi == 1 & age >= 18 & adm_year >= 2023])
+      patient_ids <- id_col(sel_coh[readm_epi == 1 & age >= 18 & adm_year >= 2018])
       
       ev_dat <- load_concepts(c("death_time", "readm_time", "censor_time", "readm_epi"), 
                               "anzics", verbose = FALSE)
@@ -67,8 +67,6 @@ load_data <- function(src, outcome = c("death", "dcr", "readm"),
       
       # swap event = 1 with event = 2 for readm case  
       if (outcome == "readm") ev_dat[event > 0, event := 3 - event]
-      
-     
       
       ev_dat[, c("censor_time", "death_time", "readm_time", "readm_epi") := NULL]
 

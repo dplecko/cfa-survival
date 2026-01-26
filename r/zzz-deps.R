@@ -1,7 +1,8 @@
 
 root <- rprojroot::find_root(rprojroot::has_file(".gitignore"))
 pkgs <- c("data.table", "ggplot2", "ricu", "randomForestSRC", "zeallot",
-          "xgboost", "ranger", "survival", "parallel", "abind", "VineCopula")
+          "xgboost", "ranger", "survival", "parallel", "abind", "VineCopula",
+          "assertthat")
 
 Sys.setenv("RICU_CONFIG_PATH" = file.path(root, "config"))
 Sys.setenv("RICU_SRC_LOAD" = 

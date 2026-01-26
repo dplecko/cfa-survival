@@ -1,48 +1,4 @@
 
-match_grids <- function(a, b) {
-  
-  res <- integer(length(a))
-  bi <- 1
-  for (ai in seq_along(a)) {
-    while (bi <= length(b) && b[bi] < a[ai]) {
-      bi <- bi + 1
-    }
-    if (bi > length(b)) {
-      res[ai] <- length(b)  # a[i] > max(b)
-    } else if (b[bi] < a[ai]) {
-      res[ai] <- NA_integer_
-    } else if (bi == 1 && b[bi] > a[ai]) {
-      res[ai] <- NA_integer_  # a[i] < min(b)
-    } else {
-      res[ai] <- bi
-    }
-  }
-  
-  res
-}
-
-match_grids_lwr <- function(a, b) {
-  
-  res <- rep(NA_integer_, length(a))
-  acurr <- bcurr <- 1
-  while (acurr <= length(a) & bcurr <= length(b)) {
-    
-    # assign index if possible
-    if (a[acurr] >= b[bcurr]) {
-      
-      res[acurr] <- bcurr
-      acurr <- acurr + 1
-    }
-    
-    # move b to the left as much as possible
-    while(bcurr+1 <= length(b) && acurr <= length(a) && b[bcurr+1] <= a[acurr]) {
-      bcurr <- bcurr + 1
-    }
-  }
-  
-  res
-}
-
 cv_xgb <- function(df, y, weights = NULL, ...) {
   
   if (is.character(as.matrix(df))) browser()
@@ -68,153 +24,6 @@ cv_xgb <- function(df, y, weights = NULL, ...) {
   )
   
   return(cv$pred)
-}
-
-chf_rfs_cf <- function(data, X, time_var, event_var, rhs, time_interest,
-                       balance_groups, split_forest, K = 5, ...) {
-  n <- nrow(data)
-  idx <- sample(rep(1:K, length.out = n))
-  
-  if (balance_groups) {
-    
-    wt0 <- 1 / mean(data[[X]] == 0)
-    wt1 <- 1 / mean(data[[X]] == 1) 
-  }
-  
-  chf <- chfx0 <- chfx1 <- srv <- srvx0 <- srvx1 <- 
-    cif <- cifx0 <- cifx1 <- vector("list", K)
-  if (is.null(time_interest)) time_interest <- 150 # use 150 time points
-  ind <- NULL
-  
-  # check if any competing risk events are considered
-  is_cr <- if (!all(data[[event_var]] %in% c(0, 1))) TRUE else FALSE
-  
-  # instantiate the formula (rhs already aware of split_forest argument)
-  frml <- as.formula(paste0("Surv(", time_var, ", ", event_var, ") ~ ", rhs))
-
-  for (k in 1:K) {
-    trn <- data[idx != k]
-    val <- data[idx == k]
-    ind <- c(ind, which(idx == k))
-    indx1 <- trn[[X]] == 1
-    
-    valx0 <- copy(val)
-    valx1 <- copy(val)
-    valx0[[X]] <- 0
-    valx1[[X]] <- 1
-    
-    if (split_forest) {
-      
-      objx1 <- rfsrc(frml, data = trn[indx1, ], ntime = time_interest,
-                     samptype = "swr", ...)
-      if (length(time_interest) == 1) time_interest <- objx1$time.interest
-      objx0 <- rfsrc(frml, data = trn[!indx1, ], ntime = time_interest,
-                     samptype = "swr", ...)
-    } else {
-
-      # training weights
-      gwt <- if (balance_groups) ifelse(trn[[X]], wt1, wt0) else rep(1, nrow(trn))
-      gsize <- if (balance_groups) 2 * min(table(trn[[X]])) else nrow(trn)
-      objx0 <- objx1 <- rfsrc(frml, data = trn, ntime = time_interest, 
-                              case.wt = gwt, samptype = "swr", sampsize = gsize,
-                              ...)
-      if (length(time_interest) == 1) time_interest <- objx1$time.interest
-    }
-    
-    predsx0 <- predict(objx0, newdata = valx0)
-    predsx1 <- predict(objx1, newdata = valx1)
-    
-    chfx0[[k]] <- predsx0$chf
-    chfx1[[k]] <- predsx1$chf
-    
-    if (is_cr) {
-      
-      cifx0[[k]] <- predsx0$cif
-      cifx1[[k]] <- predsx1$cif
-      
-      # for competing risks, overall survival S(t) = 1 - \sum CIF_j(t)
-      srvx0[[k]] <- 1 - apply(cifx0[[k]], c(1, 2), sum)
-      srvx1[[k]] <- 1 - apply(cifx1[[k]], c(1, 2), sum)
-    } else {
-      
-      srvx0[[k]] <- predsx0$survival
-      srvx1[[k]] <- predsx1$survival
-    }
-    
-    grid_ordx1 <- match_grids(time_interest, c(-Inf, objx1$time.interest))
-    grid_ordx0 <- match_grids(time_interest, c(-Inf, objx0$time.interest))
-    
-    if (is_cr) {
-      
-      zeros_dim <- dim(chfx1[[k]])
-      zeros_dim[2] <- 1
-      zeros <- array(0, dim = zeros_dim)
-      ones <- array(1, dim = zeros_dim)
-      
-      chfx0[[k]] <- abind(zeros, chfx0[[k]], along = 2)[, grid_ordx0, ]
-      chfx1[[k]] <- abind(zeros, chfx1[[k]], along = 2)[, grid_ordx1, ]
-      
-      srvx0[[k]] <- cbind(1, srvx0[[k]])[, grid_ordx0]
-      srvx1[[k]] <- cbind(1, srvx1[[k]])[, grid_ordx1]
-      
-      cifx0[[k]] <- abind(ones, cifx0[[k]], along = 2)[, grid_ordx0, ]
-      cifx1[[k]] <- abind(ones, cifx1[[k]], along = 2)[, grid_ordx1, ]
-      
-    } else {
-      
-      chfx0[[k]] <- cbind(0, chfx0[[k]])[, grid_ordx0]
-      chfx1[[k]] <- cbind(0, chfx1[[k]])[, grid_ordx1]
-
-      srvx0[[k]] <- cbind(1, srvx0[[k]])[, grid_ordx0]
-      srvx1[[k]] <- cbind(1, srvx1[[k]])[, grid_ordx1]
-    }
-  }
-  
-  indx1 <- data[[X]] == 1
-  if (is_cr) {
-    
-    ret <- list(
-      chf = NULL,
-      chfx0 = do.call(abind, args = list(chfx0, along = 1))[order(ind), ,],
-      chfx1 = do.call(abind, args = list(chfx1, along = 1))[order(ind), ,],
-      srv = NULL,
-      srvx0 = do.call(rbind, srvx0)[order(ind), ],
-      srvx1 = do.call(rbind, srvx1)[order(ind), ],
-      cif = NULL,
-      cifx0 = do.call(abind, args = list(cifx0, along = 1))[order(ind), ,],
-      cifx1 = do.call(abind, args = list(cifx1, along = 1))[order(ind), ,],
-      time_interest = time_interest
-    )
-    
-    ret$chf <- ret$chfx0
-    ret$chf[indx1, ,] <- ret$chfx1[indx1, ,]
-    
-    ret$srv <- ret$srvx0
-    ret$srv[indx1, ] <- ret$srvx1[indx1, ]
-    
-    ret$cif <- ret$cifx0
-    ret$cif[indx1, ,] <- ret$cifx1[indx1, ,]
-  } else {
-    
-    ret <- list(
-      chf = NULL,
-      chfx0 = do.call(rbind, chfx0)[order(ind), ],
-      chfx1 = do.call(rbind, chfx1)[order(ind), ],
-      srv = NULL,
-      srvx0 = do.call(rbind, srvx0)[order(ind), ],
-      srvx1 = do.call(rbind, srvx1)[order(ind), ],
-      cif = NULL, cifx0 = NULL, cifx1 = NULL,
-      time_interest = time_interest
-    )
-    
-    ret$chf <- ret$chfx0
-    ret$chf[indx1, ] <- ret$chfx1[indx1, ]
-    
-    ret$srv <- ret$srvx0
-    ret$srv[indx1, ] <- ret$srvx1[indx1, ]
-  }
-  
-  ret
 }
 
 chf_01 <- function(data, X, time_var, event_var, rhs, method, time_interest,
@@ -292,6 +101,22 @@ fair_surv <- function(data, X, Z, W, time_var, event_var, rhs=".",
            X, time_var, event_var, rhs, method, time_interest, balance_groups,
            split_forest, ...)
   
+  true_nuiss <- FALSE
+  if (true_nuiss) {
+    
+    x1_ind <- data[[X]] == 1
+    s_true <- S_T_potential_curves_from_gen(g, tgrid)
+    
+    srvx0 <- s_true[["S_x0_wx0"]]
+    srvx0[x1_ind, ] <- s_true[["S_x0_wx1"]][x1_ind, ]
+    
+    srvx1 <- s_true[["S_x1_wx0"]]
+    srvx1[x1_ind, ] <- s_true[["S_x1_wx1"]][x1_ind, ]
+    
+    srv <- srvx0
+    srv[x1_ind, ] <- srvx1[x1_ind, ]
+  }
+  
   tv_test <- function(srv, data, X, time_var, event_var, time_interest) {
     
     idx1 <- data[[X]] == 1
@@ -327,8 +152,8 @@ fair_surv <- function(data, X, Z, W, time_var, event_var, rhs=".",
   
   # get the propensity scores - regress X on Z, Z+W
   px_zw <- cv_xgb(data[, c(Z, W), with=FALSE], data[[X]])
-  px_z <- cv_xgb(data[, c(Z), with=FALSE], data[[X]])
-  px <- mean(data[[X]])
+  px_z  <- cv_xgb(data[, c(Z),    with=FALSE], data[[X]])
+  px    <- mean(data[[X]])
   
   wgh_sum <- function(x, wgh) sum(x * wgh) / sum(wgh)
   
@@ -485,9 +310,11 @@ fair_surv <- function(data, X, Z, W, time_var, event_var, rhs=".",
   by_cols <- c("time_interest", "scale", "event")
   if (is_sens) by_cols <- c(by_cols, "tau", "copula")
   
-  res <- melt(res_diff, id.vars = by_cols, variable.name = "effect")
+  res <- melt(res_diff, id.vars = by_cols, variable.name = "effect",
+              variable.factor = FALSE)
   if (!is.null(res_ratio)) res <-
-    rbind(res, melt(res_ratio, id.vars = by_cols, variable.name = "effect"))
+    rbind(res, melt(res_ratio, id.vars = by_cols, variable.name = "effect",
+                    variable.factor = FALSE))
   
   structure(
     list(
@@ -526,7 +353,7 @@ copula_gen <- function(theta, copula, inv = FALSE) {
   } else if (copula == "frank") {
     
     gen <- function(t) -log ( (exp(-theta * t ) - 1) / (exp(-theta) - 1) )
-    inv_gen <- function(t) 1/theta * log ( 1 + exp(-t) * (exp(-theta) - 1) )
+    inv_gen <- function(t) -1/theta * log ( 1 + exp(-t) * (exp(-theta) - 1) )
   }
   
   if (inv) return(inv_gen) else return(gen)
@@ -547,24 +374,74 @@ cif_copula <- function(cif, copula, tau) {
   
   for (i in seq.int(2, ncol(srv))) {
     
-    # # Delta CIF2 = 0 value
-    # inv_gen(gen(srv[, i]) - gen(srv[, i-1]) + gen(shat[, i-1])) # shat
-    # chat[, i-1] # chat
-    # 
-    # # Delta CIF1 = 0 value
-    # shat[, i-1] # shat
-    # inv_gen(gen(srv[, i]) - gen(srv[, i-1]) + gen(chat[, i-1])) # chat value
+    # H(t, c) is the joint survival
     
-    # both Delta CIF != 0
-    sjnt_t_tp <- srv[, i] + d_cif2[, i-1]
-    chat[, i] <- inv_gen(gen(sjnt_t_tp) - gen(shat[, i-1])) # chat
-    shat[, i] <- inv_gen(
-      gen(srv[, i]) - gen(srv[, i-1]) + gen(chat[, i-1]) - gen(chat[, i]) +
+    # Step 1: update chat first (this gives a lower bound on chat)
+    H_t_tp <- srv[, i] + d_cif2[, i-1]
+    chat_ilwr <- inv_gen(gen(H_t_tp) - gen(shat[, i-1]))
+    shat_iupr <- inv_gen(
+      gen(srv[, i]) - gen(srv[, i-1]) + gen(chat[, i-1]) - gen(chat_ilwr) +
         gen(shat[, i-1])
     )
+    
+    # Step 2: update shat first (this gives a lower bound on shat)
+    H_tp_t <- srv[, i] + d_cif1[, i-1]
+    shat_ilwr <- inv_gen(gen(H_tp_t) - gen(chat[, i-1]))
+    chat_iupr <- inv_gen(
+      gen(srv[, i]) - gen(srv[, i-1]) + gen(shat[, i-1]) - gen(shat_ilwr) +
+        gen(chat[, i-1])
+    )
+    
+      
+    chat[, i] <- 1/2 * (chat_ilwr + chat_iupr)
+    shat[, i] <- 1/2 * (shat_ilwr + shat_iupr)
   }
   
   shat[, -1]
+}
+
+cif_copula_single <- function(cif1, cif2, copula, tau) {
+  # cif1, cif2: numeric vectors over the same time grid (no t=0 included)
+  stopifnot(is.numeric(cif1), is.numeric(cif2), length(cif1) == length(cif2))
+  
+  theta <- tau_to_theta(tau, copula)
+  gen <- copula_gen(theta, copula)
+  inv_gen <- copula_gen(theta, copula, inv = TRUE)
+  
+  cif1 <- c(0, cif1)
+  cif2 <- c(0, cif2)
+  
+  srv <- 1 - cif1 - cif2
+  d1 <- diff(cif1)
+  d2 <- diff(cif2)
+  
+  m <- length(srv)
+  shat <- chat <- rep(1, m)
+  
+  for (i in 2:m) {
+    
+    # Step 1: update chat first
+    H_t_tp <- srv[i] + d2[i-1]
+    chat_ilwr <- inv_gen(gen(H_t_tp) - gen(shat[i-1]))
+    shat_iupr <- inv_gen(
+      gen(srv[i]) - gen(srv[i-1]) + gen(chat[i-1]) - gen(chat_ilwr) + gen(shat[i-1])
+    )
+    
+    # Step 2: update shat first
+    H_tp_t <- srv[i] + d1[i-1]
+    shat_ilwr <- inv_gen(gen(H_tp_t) - gen(chat[i-1]))
+    chat_iupr <- inv_gen(
+      gen(srv[i]) - gen(srv[i-1]) + gen(shat[i-1]) - gen(shat_ilwr) + gen(chat[i-1])
+    )
+    
+    if (any(is.nan(c(chat_ilwr, chat_iupr, shat_ilwr, shat_iupr)))) browser()
+    
+    # Step 3: take the midpoint of the two bounds
+    chat[i] <- 0.5 * (chat_ilwr + chat_iupr)
+    shat[i] <- 0.5 * (shat_ilwr + shat_iupr)
+  }
+  
+  shat[-1]
 }
 
 autoplot.fairsurv <- function(object, 
@@ -640,4 +517,70 @@ autoplot.fairsurv <- function(object,
   }
   
   p
+}
+
+#' * new fair_surv code -- modular IPW/model-based/AIPW *
+fs_fit <- function(data, X, Z, W, time_var, event_var,
+                   time_interest = NULL,
+                   balance_groups = FALSE, split_forest = FALSE, ...) {
+  # propensities (exactly as before)
+  e_zw <- cv_xgb(data[, c(Z, W), with = FALSE], data[[X]])
+  e_z  <- cv_xgb(data[, c(Z),    with = FALSE], data[[X]])
+  p1   <- mean(data[[X]])
+  
+  # outcome S/CIF via your rfs learner
+  rhs_out <- paste(c(if (!split_forest) X, Z, W), collapse = "+")
+  out <- chf_rfs_cf(
+    data = data[, c(X, Z, W, time_var, event_var), with = FALSE],
+    X = X, time_var = time_var, event_var = event_var,
+    rhs = rhs_out, time_interest = time_interest,
+    balance_groups = balance_groups, split_forest = split_forest, ...
+  )
+  
+  # censoring G(t): flip event to "censoring event" (1 if censored)
+  dG <- copy(data)
+  dG[[event_var]] <- as.integer(dG[[event_var]] == 0L)
+  rhs_cen <- paste(c(if (!split_forest) X, Z, W), collapse = "+")
+  cen <- chf_rfs_cf(
+    data = dG[, c(X, Z, W, time_var, event_var), with = FALSE],
+    X = X, time_var = time_var, event_var = event_var,
+    rhs = rhs_cen, time_interest = out$time_interest,
+    balance_groups = balance_groups, split_forest = split_forest, ...
+  )
+  
+  list(
+    data = data,
+    X = X, Z = Z, W = W, time_var = time_var, event_var = event_var,
+    grid = list(t = out$time_interest, J = if (is.null(out$cif)) 1L else dim(out$cif)[3]),
+    ps = list(e_z = e_z, e_zw = e_zw, p1 = p1, meta = list(engine = "xgb")),
+    S = list(
+      S_x0 = out$srvx0, S_x1 = out$srvx1,
+      CIF_x0 = out$cifx0, CIF_x1 = out$cifx1,
+      meta = list(engine = "rfsrc")
+    ),
+    G = list(
+      G_x0 = cen$srvx0, G_x1 = cen$srvx1,
+      meta = list(engine = "rfsrc")
+    )
+  )
+}
+
+fs_estimate <- function(pack, method = c("model","ipw","aipw")) {
+  method <- match.arg(method)
+  switch(method,
+         model = fs_estimate_model(pack),
+         ipw   = fs_estimate_ipw(pack),
+         aipw  = fs_estimate_aipw(pack)
+  )
+}
+
+fair_surv_v2 <- function(data, X, Z, W, time_var, event_var,
+                         time_interest = NULL,
+                         balance_groups = FALSE, split_forest = FALSE,
+                         method = c("model","ipw","aipw"), ...) {
+  
+  pack <- fs_fit(data, X, Z, W, time_var, event_var,
+                 time_interest, balance_groups, split_forest, ...)
+  est  <- fs_estimate(pack, method = match.arg(method))
+  est
 }
