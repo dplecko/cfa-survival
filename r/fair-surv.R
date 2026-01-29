@@ -377,18 +377,18 @@ cif_copula <- function(cif, copula, tau) {
     # H(t, c) is the joint survival
     
     # Step 1: update chat first (this gives a lower bound on chat)
-    H_t_tp <- srv[, i] + d_cif2[, i-1]
-    chat_ilwr <- inv_gen(gen(H_t_tp) - gen(shat[, i-1]))
-    shat_iupr <- inv_gen(
-      gen(srv[, i]) - gen(srv[, i-1]) + gen(chat[, i-1]) - gen(chat_ilwr) +
+    H_t_tp <- srv[, i] + d_cif1[, i-1] # this is srv[, i-1] - d_cif2[, i-1]
+    chat_iupr <- inv_gen(gen(H_t_tp) - gen(shat[, i-1]))
+    shat_ilwr <- inv_gen(
+      gen(srv[, i]) - gen(srv[, i-1]) + gen(chat[, i-1]) - gen(chat_iupr) +
         gen(shat[, i-1])
     )
     
     # Step 2: update shat first (this gives a lower bound on shat)
-    H_tp_t <- srv[, i] + d_cif1[, i-1]
-    shat_ilwr <- inv_gen(gen(H_tp_t) - gen(chat[, i-1]))
-    chat_iupr <- inv_gen(
-      gen(srv[, i]) - gen(srv[, i-1]) + gen(shat[, i-1]) - gen(shat_ilwr) +
+    H_tp_t <- srv[, i] + d_cif2[, i-1] # this is srv[, i-1] - d_cif1[, i-1]
+    shat_iupr <- inv_gen(gen(H_tp_t) - gen(chat[, i-1]))
+    chat_ilwr <- inv_gen(
+      gen(srv[, i]) - gen(srv[, i-1]) + gen(shat[, i-1]) - gen(shat_iupr) +
         gen(chat[, i-1])
     )
     
@@ -401,7 +401,7 @@ cif_copula <- function(cif, copula, tau) {
 }
 
 cif_copula_single <- function(cif1, cif2, copula, tau) {
-  # cif1, cif2: numeric vectors over the same time grid (no t=0 included)
+  
   stopifnot(is.numeric(cif1), is.numeric(cif2), length(cif1) == length(cif2))
   
   theta <- tau_to_theta(tau, copula)
@@ -421,17 +421,17 @@ cif_copula_single <- function(cif1, cif2, copula, tau) {
   for (i in 2:m) {
     
     # Step 1: update chat first
-    H_t_tp <- srv[i] + d2[i-1]
-    chat_ilwr <- inv_gen(gen(H_t_tp) - gen(shat[i-1]))
-    shat_iupr <- inv_gen(
-      gen(srv[i]) - gen(srv[i-1]) + gen(chat[i-1]) - gen(chat_ilwr) + gen(shat[i-1])
+    H_t_tp <- srv[i] + d1[i-1] # this is srv[i-1] - d2[i-1]
+    chat_iupr <- inv_gen(gen(H_t_tp) - gen(shat[i-1]))
+    shat_ilwr <- inv_gen(
+      gen(srv[i]) - gen(srv[i-1]) + gen(chat[i-1]) - gen(chat_iupr) + gen(shat[i-1])
     )
     
     # Step 2: update shat first
-    H_tp_t <- srv[i] + d1[i-1]
-    shat_ilwr <- inv_gen(gen(H_tp_t) - gen(chat[i-1]))
-    chat_iupr <- inv_gen(
-      gen(srv[i]) - gen(srv[i-1]) + gen(shat[i-1]) - gen(shat_ilwr) + gen(chat[i-1])
+    H_tp_t <- srv[i] + d2[i-1] # this is srv[i-1] - d1[i-1]
+    shat_iupr <- inv_gen(gen(H_tp_t) - gen(chat[i-1]))
+    chat_ilwr <- inv_gen(
+      gen(srv[i]) - gen(srv[i-1]) + gen(shat[i-1]) - gen(shat_iupr) + gen(chat[i-1])
     )
     
     if (any(is.nan(c(chat_ilwr, chat_iupr, shat_ilwr, shat_iupr)))) browser()
@@ -519,68 +519,3 @@ autoplot.fairsurv <- function(object,
   p
 }
 
-#' * new fair_surv code -- modular IPW/model-based/AIPW *
-fs_fit <- function(data, X, Z, W, time_var, event_var,
-                   time_interest = NULL,
-                   balance_groups = FALSE, split_forest = FALSE, ...) {
-  # propensities (exactly as before)
-  e_zw <- cv_xgb(data[, c(Z, W), with = FALSE], data[[X]])
-  e_z  <- cv_xgb(data[, c(Z),    with = FALSE], data[[X]])
-  p1   <- mean(data[[X]])
-  
-  # outcome S/CIF via your rfs learner
-  rhs_out <- paste(c(if (!split_forest) X, Z, W), collapse = "+")
-  out <- chf_rfs_cf(
-    data = data[, c(X, Z, W, time_var, event_var), with = FALSE],
-    X = X, time_var = time_var, event_var = event_var,
-    rhs = rhs_out, time_interest = time_interest,
-    balance_groups = balance_groups, split_forest = split_forest, ...
-  )
-  
-  # censoring G(t): flip event to "censoring event" (1 if censored)
-  dG <- copy(data)
-  dG[[event_var]] <- as.integer(dG[[event_var]] == 0L)
-  rhs_cen <- paste(c(if (!split_forest) X, Z, W), collapse = "+")
-  cen <- chf_rfs_cf(
-    data = dG[, c(X, Z, W, time_var, event_var), with = FALSE],
-    X = X, time_var = time_var, event_var = event_var,
-    rhs = rhs_cen, time_interest = out$time_interest,
-    balance_groups = balance_groups, split_forest = split_forest, ...
-  )
-  
-  list(
-    data = data,
-    X = X, Z = Z, W = W, time_var = time_var, event_var = event_var,
-    grid = list(t = out$time_interest, J = if (is.null(out$cif)) 1L else dim(out$cif)[3]),
-    ps = list(e_z = e_z, e_zw = e_zw, p1 = p1, meta = list(engine = "xgb")),
-    S = list(
-      S_x0 = out$srvx0, S_x1 = out$srvx1,
-      CIF_x0 = out$cifx0, CIF_x1 = out$cifx1,
-      meta = list(engine = "rfsrc")
-    ),
-    G = list(
-      G_x0 = cen$srvx0, G_x1 = cen$srvx1,
-      meta = list(engine = "rfsrc")
-    )
-  )
-}
-
-fs_estimate <- function(pack, method = c("model","ipw","aipw")) {
-  method <- match.arg(method)
-  switch(method,
-         model = fs_estimate_model(pack),
-         ipw   = fs_estimate_ipw(pack),
-         aipw  = fs_estimate_aipw(pack)
-  )
-}
-
-fair_surv_v2 <- function(data, X, Z, W, time_var, event_var,
-                         time_interest = NULL,
-                         balance_groups = FALSE, split_forest = FALSE,
-                         method = c("model","ipw","aipw"), ...) {
-  
-  pack <- fs_fit(data, X, Z, W, time_var, event_var,
-                 time_interest, balance_groups, split_forest, ...)
-  est  <- fs_estimate(pack, method = match.arg(method))
-  est
-}

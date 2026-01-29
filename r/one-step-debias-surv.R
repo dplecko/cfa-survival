@@ -133,9 +133,6 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest, ..
     
     gm_xzw <- rep(NA, n)
     G_m <- function(m, G, ggrid) {
-      # m: length-n vector
-      # G: n x K matrix, columns correspond to ggrid (length K)
-      # ggrid: length-K increasing, typically starts at 0
       
       stopifnot(is.numeric(m), is.numeric(ggrid), is.matrix(G))
       stopifnot(length(ggrid) == ncol(G), length(m) == nrow(G))
@@ -144,8 +141,8 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest, ..
       m0 <- pmax(ggrid[1], pmin(m, ggrid[length(ggrid)]))
       
       # find interval index i s.t. ggrid[i] <= m0 <= ggrid[i+1]
-      i <- .bincode(m0, ggrid)              # returns in 1..length(ggrid)
-      i <- pmin(i, length(ggrid) - 1L)      # cap at K-1 for i+1 indexing
+      i <- .bincode(m0, ggrid)              
+      i <- pmin(i, length(ggrid) - 1L)
       
       t0 <- ggrid[i]
       t1 <- ggrid[i + 1L]
@@ -156,7 +153,7 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest, ..
       
       # linear interpolation weight
       w <- (m0 - t0) / (t1 - t0)
-      w[!is.finite(w)] <- 0                 # handles t1==t0 (shouldn't happen)
+      w[!is.finite(w)] <- 0
       
       (1 - w) * g0 + w * g1
     }
@@ -166,9 +163,6 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest, ..
       gm_xzw[tst] <- G_m(data[[time_var]][tst], g_xzw_mod[[i]][["srv_tst"]], tgrid)
     }
   }
-  
-  #' * replacing nuissance functions with GT? * 
-  true_nuiss <- FALSE
   
   # cross-fit
   for (i in seq_len(K)) {
@@ -252,7 +246,7 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest, ..
       px_z[[1 + 1]][tst] <- mean(x)
     }
     
-    if (true_nuiss) next
+    # if (true_nuiss) next
     for (t in seq_along(tgrid)) for (xw in c(0, 1)) for (xy in c(0, 1)) {
       
       if (!is_cr) {
@@ -289,41 +283,7 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest, ..
       }
     }
   }
-  
-  
-  if (true_nuiss) {
-    
-    x1_ind <- x == 1
-    ey_nest_lst <- list(list(list(), list()), list(list(), list()))
 
-    # get ground truth for S, G
-    s_true <- S_T_potential_curves_from_gen(g, tgrid)
-    g_true <- ground_truth_G(g, tgrid)
-    
-    ey_nest_lst[[0 + 1]][[0 + 1]] <- E_S_x0_given_x0_Z(g, tgrid)
-    ey_nest_lst[[0 + 1]][[1 + 1]] <- E_S_x1_given_x0_Z(g, tgrid)
-    ey_nest_lst[[1 + 1]][[0 + 1]] <- E_S_x0_given_x1_Z(g, tgrid)
-    ey_nest_lst[[1 + 1]][[1 + 1]] <- E_S_x1_given_x1_Z(g, tgrid)
-    
-    for (t in seq_along(tgrid)) {
-      
-      ri_adj[[t]] <- (data[[time_var]] > tgrid[t]) / g_true[, t]
-      
-      for (xy in c(0, 1)) {
-        
-        y_xzw[[xy + 1]][[t]][x1_ind] <- 
-          s_true[[paste0("S_x", xy, "_wx1")]][x1_ind, t]
-        y_xzw[[xy + 1]][[t]][!x1_ind] <- 
-          s_true[[paste0("S_x", xy, "_wx0")]][!x1_ind, t]
-        
-        for (xw in c(0, 1)) {
-          
-          ey_nest[[xw+1]][[xy+1]][[t]] <- ey_nest_lst[[xw+1]][[xy+1]][, t]
-        }
-      }
-    }
-  }
-  
   list(
     ria = ri_adj,
     y_xzw = y_xzw,
@@ -475,12 +435,6 @@ one_step_debias_surv <- function(data, X, Z, W, time_var, event_var,
   
   is_sens <- if (!is.null(copula)) TRUE else FALSE
   if (is_sens) {
-    
-    trim_cif <- function(cif) {
-      
-      cif <- pmin(pmax(cif, 0), 1)
-      cummax(cif)
-    }
 
     res <- c()
     elm <- list(
@@ -518,21 +472,20 @@ one_step_debias_surv <- function(data, X, Z, W, time_var, event_var,
       cif_b <- cif[[xz+1]][[xw+1]][[xy+1]][[2]][["mu"]]
       sd_b <- cif[[xz+1]][[xw+1]][[xy+1]][[2]][["sd"]]
       
+      # four corners + sampling
       for (tau_id in seq_along(tau_grid)) {
         
-        shat_mean <- cif_copula_single(cif_a, cif_b, copula, tau_grid[tau_id])
-        shat[[xz+1]][[xw+1]][[xy+1]][[tau_id]][["mean"]] <- shat_mean
+        sh <- cuatro_esquinas(
+          c1 = cif_a, s1 = sd_a,
+          c2 = cif_b, s2 = sd_b,
+          copula = copula, tau = tau_grid[tau_id],
+          z = 1.96, trim_cif = trim_cif,
+          do_samp = TRUE
+        )
         
-        shat_upr <- cif_copula_single(trim_cif(cif_a - 1.96 * sd_a), 
-                                      trim_cif(cif_b + 1.96 * sd_b), 
-                                      copula, tau_grid[tau_id])
-        shat[[xz+1]][[xw+1]][[xy+1]][[tau_id]][["upr"]] <- shat_upr
-        
-        shat_lwr <- cif_copula_single(trim_cif(cif_a + 1.96 * sd_a), 
-                                      trim_cif(cif_b - 1.96 * sd_b), 
-                                      copula, tau_grid[tau_id])
-        if (tau_grid[tau_id] == 0.5) browser()
-        shat[[xz+1]][[xw+1]][[xy+1]][[tau_id]][["lwr"]] <- shat_lwr
+        shat[[xz+1]][[xw+1]][[xy+1]][[tau_id]][["mean"]] <- sh[["mean"]]
+        shat[[xz+1]][[xw+1]][[xy+1]][[tau_id]][["lwr"]]  <- sh[["lwr"]]
+        shat[[xz+1]][[xw+1]][[xy+1]][[tau_id]][["upr"]]  <- sh[["upr"]]
       }
     }
     
@@ -566,36 +519,14 @@ one_step_debias_surv <- function(data, X, Z, W, time_var, event_var,
         )
       }
     }
+  } else { # non-sensitivity setting (classical or CR)
     
-    return(res)
-  }
-  
-  res <- c()
-  for (i in seq_along(eff)) {
-    
-    for (t in seq_along(cfit$tgrid)) {
+    res <- c()
+    for (i in seq_along(eff)) {
       
-      if (!cfit$is_cr) {
+      for (t in seq_along(cfit$tgrid)) {
         
-        pseudo_out <- 0
-        for (s in seq_along(eff[[i]]$sgn)) {
-          
-          xz <- eff[[i]]$spc[[s]][1]
-          xw <- eff[[i]]$spc[[s]][2]
-          xy <- eff[[i]]$spc[[s]][3]
-          pseudo_out <- pseudo_out + eff[[i]]$sgn[s] * pso[[xz+1]][[xw+1]][[xy+1]][[t]]
-        }
-        psi_osd <- mean(pseudo_out, na.rm = TRUE)
-        dev <- sqrt(var(pseudo_out, na.rm = TRUE) / sum(!is.na(pseudo_out)))
-        
-        res <- rbind(
-          res,
-          data.frame(effect = eff[[i]]$nm, value = psi_osd, sd = dev, 
-                     time_interest = cfit$tgrid[t])
-        ) 
-      } else {
-        
-        for (j in seq_len(cfit$nlvls)) {
+        if (!cfit$is_cr) {
           
           pseudo_out <- 0
           for (s in seq_along(eff[[i]]$sgn)) {
@@ -603,8 +534,7 @@ one_step_debias_surv <- function(data, X, Z, W, time_var, event_var,
             xz <- eff[[i]]$spc[[s]][1]
             xw <- eff[[i]]$spc[[s]][2]
             xy <- eff[[i]]$spc[[s]][3]
-            pseudo_out <- pseudo_out + 
-              eff[[i]]$sgn[s] * pso[[xz+1]][[xw+1]][[xy+1]][[t]][[j]]
+            pseudo_out <- pseudo_out + eff[[i]]$sgn[s] * pso[[xz+1]][[xw+1]][[xy+1]][[t]]
           }
           psi_osd <- mean(pseudo_out, na.rm = TRUE)
           dev <- sqrt(var(pseudo_out, na.rm = TRUE) / sum(!is.na(pseudo_out)))
@@ -612,14 +542,165 @@ one_step_debias_surv <- function(data, X, Z, W, time_var, event_var,
           res <- rbind(
             res,
             data.frame(effect = eff[[i]]$nm, value = psi_osd, sd = dev, 
-                       time_interest = cfit$tgrid[t], event = j)
-          )  
+                       time_interest = cfit$tgrid[t])
+          ) 
+        } else {
+          
+          for (j in seq_len(cfit$nlvls)) {
+            
+            pseudo_out <- 0
+            for (s in seq_along(eff[[i]]$sgn)) {
+              
+              xz <- eff[[i]]$spc[[s]][1]
+              xw <- eff[[i]]$spc[[s]][2]
+              xy <- eff[[i]]$spc[[s]][3]
+              pseudo_out <- pseudo_out + 
+                eff[[i]]$sgn[s] * pso[[xz+1]][[xw+1]][[xy+1]][[t]][[j]]
+            }
+            psi_osd <- mean(pseudo_out, na.rm = TRUE)
+            dev <- sqrt(var(pseudo_out, na.rm = TRUE) / sum(!is.na(pseudo_out)))
+            
+            res <- rbind(
+              res,
+              data.frame(effect = eff[[i]]$nm, value = psi_osd, sd = dev, 
+                         time_interest = cfit$tgrid[t], event = j)
+            )  
+          }
         }
       }
     }
   }
   
-  # pw <- list(px_z = cfit$px_z, px_zw = cfit$px_zw)
-  # attr(res, "pw") <- pw
-  as.data.table(res)
+  structure(
+    list(
+      measures = as.data.table(res),
+      is_cr = cfit$is_cr, is_sens = is_sens,
+      time_interest = cfit$tgrid, copula = copula, tau_grid = tau_grid
+    ), class = "fairsurv_osd"
+  )
+}
+
+autoplot.fairsurv_osd <- function(object, ...) {
+  
+  meas <- c("ctfde", "ctfie", "ctfse", "tv")
+  
+  alpha <- 0.05 # fixed for now
+  width <- qnorm(1 - alpha / 2)
+  
+  plt_dat <- copy(object$measures)
+  plt_dat[, effect := factor(effect, levels = c("tv", "ctfde", "ctfie", "ctfse"),
+          labels = c("Total Variation", "Direct", "Indirect", "Spurious"))]
+  if (object$is_sens) { # 
+    
+    # tau as linetype (assumes up to 4 tau values)
+    plt_dat[, tau_f := factor(tau, levels = sort(unique(tau)))]
+    lt_vals <- c("solid", "dashed", "dotted", "dotdash")[seq_len(length(levels(plt_dat$tau_f)))]
+    
+    # union envelope over tau (one ribbon per effect)
+    env <- plt_dat[, .(lwr = min(lwr), upr = max(upr)),
+                   by = c("effect", "time_interest")]
+    
+    p <- ggplot(plt_dat, aes(x = time_interest, y = value, color = effect)) +
+      geom_ribbon(
+        data = env,
+        aes(ymin = lwr, ymax = upr, fill = effect, x = time_interest),
+        alpha = 0.2, linewidth = 0, inherit.aes = FALSE
+      ) +
+      geom_line(aes(linetype = tau_f), linewidth = 1) +
+      theme_bw(base_size = 14) +
+      xlab("Time") + ylab("Effect Value") +
+      scale_color_discrete(
+        name = "Effect", labels = c("TV", "x-DE", "x-IE", "x-SE")
+      ) +
+      scale_fill_discrete(
+        name = "Effect", labels = c("TV", "x-DE", "x-IE", "x-SE")) +
+      scale_linetype_manual(name = latex2exp::TeX("$\\tau$"), values = lt_vals) +
+      facet_wrap(~effect, ncol = 4, scales = "free") +
+      theme(legend.position = "bottom", axis.text = element_text(size = 9)) + 
+      guides(
+        linetype = guide_legend(
+          title.theme = element_text(size = 20)
+        )
+      ) +
+      scale_y_continuous(labels = scales::percent)
+    
+  } else if (object$is_cr) { # competing risks
+    
+    p <- ggplot(plt_dat, aes(x = time_interest, y = value, color = effect, 
+                            fill = effect)) +
+      geom_line() + theme_bw() +
+      geom_ribbon(aes(ymin = value - width * sd, ymax = value + width * sd),
+                  alpha = 0.4, linewidth = 0) +
+      facet_wrap(~event, scales = "free")
+  } else {
+    
+    p <- ggplot(plt_dat, aes(x = time_interest, y = value, color = effect, 
+                             fill = effect)) +
+      geom_line(linewidth = 1) + theme_bw(base_size = 14) +
+      geom_ribbon(aes(ymin = value - width * sd, ymax = value + width * sd),
+                  alpha = 0.3, linewidth = 0) +
+      facet_wrap(~effect, ncol = 4, scales = "free") +
+      scale_y_continuous(labels = scales::percent) +
+      scale_fill_discrete(
+        name = "Effect",
+        labels = c("TV", "x-DE", "x-IE", "x-SE")
+      ) +
+      scale_color_discrete(
+        name = "Effect",
+        labels = c("TV", "x-DE", "x-IE", "x-SE")
+      ) +
+      xlab("Time (days)") + ylab("Effect Value") +
+      theme(legend.position = "bottom", axis.text = element_text(size = 9))
+  }
+  
+  p
+}
+
+cuatro_esquinas <- function(c1, s1, c2, s2, copula, tau, z = 1.96, trim_cif,
+                            do_samp = FALSE, B = 200, seed = NULL) {
+  
+  if (!is.null(seed)) set.seed(seed)
+  
+  c1_l <- trim_cif(c1 - z * s1); c1_u <- trim_cif(c1 + z * s1)
+  c2_l <- trim_cif(c2 - z * s2); c2_u <- trim_cif(c2 + z * s2)
+  
+  # keep CIF_1 + CIF_2 <= 1 (cheap projection)
+  proj_sum <- function(a, b) {
+    b <- pmin(b, 1 - a)
+    a <- pmin(a, 1 - b)
+    list(a = trim_cif(a), b = trim_cif(b))
+  }
+  
+  sh_mu <- cif_copula_single(c1, c2, copula, tau)
+  
+  crn <- list(
+    proj_sum(c1_l, c2_l),
+    proj_sum(c1_l, c2_u),
+    proj_sum(c1_u, c2_l),
+    proj_sum(c1_u, c2_u)
+  )
+  sh1 <- cif_copula_single(crn[[1]]$a, crn[[1]]$b, copula, tau)
+  sh2 <- cif_copula_single(crn[[2]]$a, crn[[2]]$b, copula, tau)
+  sh3 <- cif_copula_single(crn[[3]]$a, crn[[3]]$b, copula, tau)
+  sh4 <- cif_copula_single(crn[[4]]$a, crn[[4]]$b, copula, tau)
+  
+  sh_l <- pmin(pmin(sh1, sh2), pmin(sh3, sh4))
+  sh_u <- pmax(pmax(sh1, sh2), pmax(sh3, sh4))
+  
+  if (do_samp && B > 0) {
+    
+    for (b in seq_len(B)) {
+      
+      a <- runif(length(c1), c1_l, c1_u)
+      d <- runif(length(c2), c2_l, c2_u)
+      a <- trim_cif(a); d <- trim_cif(d)
+      pr <- proj_sum(a, d)
+      
+      shb <- cif_copula_single(pr$a, pr$b, copula, tau)
+      sh_l <- pmin(sh_l, shb)
+      sh_u <- pmax(sh_u, shb)
+    }
+  }
+  
+  list(mean = sh_mu, lwr = sh_l, upr = sh_u)
 }

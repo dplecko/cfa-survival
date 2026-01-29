@@ -7,6 +7,13 @@ fname <- function(src, out, balance, split) {
   paste0(paste(c(src, "fsurv", out, balance, split), collapse = "_"), ".RData")
 }
 
+# trimming functions
+trim_cif <- function(cif) {
+  
+  cif <- pmin(pmax(cif, 0), 1)
+  cummax(cif)
+}
+
 km_curves <- function(data) {
   
   sfit <- survfit(Surv(event_time, event) ~ majority, data = data)

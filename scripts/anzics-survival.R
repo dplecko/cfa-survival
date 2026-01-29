@@ -1,9 +1,9 @@
-#!/usr/bin/env Rscript
+#!/u/local/apps/R/4.2.2/gcc-4.8.5_intel-2020.4/bin/Rscript
 #$ -cwd
 #$ -j y
 #$ -N fairsurv
-#$ -pe shared 32
-#$ -l h_rt=24:00:00,h_data=4G
+#$ -pe shared 8
+#$ -l h_rt=1:00:00,h_data=1G
 
 root <- rprojroot::find_root(rprojroot::has_file(".gitignore"))
 invisible(lapply(list.files(file.path(root, "r"), full.names = TRUE), 
@@ -20,7 +20,7 @@ c(X, Z, W, event_var, time_var) %<-% attr(dat, "sfm")
 set.seed(2026)
 
 # for testing
-local <- TRUE
+local <- FALSE
 if (local) {
 
   dat_run <- dat[sample.int(nrow(dat), size = 10^3, replace=FALSE)]
@@ -31,43 +31,25 @@ if (local) {
   nboot <- 64
 }
 
+# time grid for the analysis
 tgrid <- c(1:10, 14, 28, 56, 90, 180)
 
-fsurv <- fair_surv(dat_run, X, Z, W, time_var, event_var, 
+# model-based estimation
+fsurv <- fair_surv(dat_run, X, Z, W, time_var, event_var,
                    method = "rfs-cf", nboot = 1,
                    copula = if (out == "readm") "frank" else NULL,
                    time_interest = 100,
                    tau_grid = if (out == "readm") c(0.1, 0.5, 0.8) else NULL)
 
 
-t0 <- Sys.time()
+# doubly robust estimation
 dr_fsurv <- one_step_debias_surv(
   dat_run, X, Z, W, time_var, event_var, time_interest = tgrid,
   copula = if (out == "readm") "frank" else NULL,
   tau_grid = if (out == "readm") c(0.1, 0.5, 0.8)
 )
-Sys.time() - t0
 
 
-# ggplot(dr_est, aes(x = time_interest, y = value, color = effect, fill = effect)) +
-#   geom_line() + theme_bw() +
-#   geom_ribbon(aes(ymin = value - 1.96 * sd, ymax = value + 1.96 * sd),
-#               alpha = 0.4, linewidth = 0) +
-#   facet_wrap(~effect, scales = "free")
-
-if (!local) 
-  save(fsurv, file = file.path("data", fname(src, out, balance, splitf)))
-
-# load(file.path("data", fname(src, out, balance, splitf)))
-
-# the local analyses need to be adapted!
-save <- FALSE
-if (local) {
-
-  autoplot(fsurv)
-  if (save) ggsave("results/decomp-with-static.png", width = 6, height = 4)
-  
-  autoplot(dr_fsurv)
-  if (save) ggsave("results/decomp-with-static.png", width = 6, height = 4)
-}
+autoplot(dr_fsurv)
+ggsave(file.path("results", paste0("dr-", out, ".png")), width = 14, height = 4)
 
