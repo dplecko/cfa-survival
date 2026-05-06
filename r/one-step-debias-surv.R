@@ -172,12 +172,35 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest, ..
     dev <- fld_lst[[i]][["dev"]]
     val <- fld_lst[[i]][["val"]]
     
+    M_tst <- data[[time_var]][tst]
+    Mt <- pmax(1L, findInterval(M_tst, tgrid))
+    S_M <- s_xzw_mod[[i]][["srv_tst"]][cbind(seq_along(Mt), Mt)]
+    G_M <- g_xzw_mod[[i]][["srv_tst"]][cbind(seq_along(Mt), Mt)]
+    xi2_int <- 0
     for (t in seq_along(tgrid)) {
       
       if (!is_cr) {
         
         ri_adj[[t]][tst] <- 
           (data[[time_var]][tst] > tgrid[t]) / g_xzw_mod[[i]][["srv_tst"]][, t]
+        
+        martingale_debias <- TRUE
+        if (martingale_debias) {
+          
+          S_t <- s_xzw_mod[[i]][["srv_tst"]][, t]
+          G_t <- g_xzw_mod[[i]][["srv_tst"]][, t]
+          H_tst <- g_xzw_mod[[i]][["chf_tst"]]
+          dH <- H_tst[, t] - if (t == 1) 0 else H_tst[, t - 1]
+          
+          # Accumulate Term \xi_2 (Continuous penalty integral up to t)
+          xi2_int <- xi2_int + (M_tst >= tgrid[t]) * dH / (S_t * G_t)
+          
+          # Compute Term \xi_1 (Censoring event jump)
+          xi1 <- S_t * (M_tst <= tgrid[t] & data[[event_var]][tst] == 0) / (S_M * G_M)
+          
+          # Combine: IPCW + \xi_1(t) - \xi_2(t)
+          ri_adj[[t]][tst] <- ri_adj[[t]][tst] + xi1 - (S_t * xi2_int)
+        }
         
         for (xy in c(0, 1)) {
           

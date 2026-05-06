@@ -170,6 +170,9 @@ chf_rfs_cf <- function(data, X, time_var, event_var, rhs, time_interest,
       srv[[k]] <- srvx0[[k]]
       srv[[k]][val_indx1[[k]], ] <- srvx1[[k]][val_indx1[[k]], ]
       
+      chf[[k]] <- chfx0[[k]]
+      chf[[k]][val_indx1[[k]], ] <- chfx1[[k]][val_indx1[[k]], ]
+      
       ret[[k]] <- list(
         srv_val = srv[[k]][val_idx, ],
         srvx0_val = srvx0[[k]][val_idx, ],
@@ -177,6 +180,12 @@ chf_rfs_cf <- function(data, X, time_var, event_var, rhs, time_interest,
         srv_tst = srv[[k]][-val_idx, ],
         srvx0_tst = srvx0[[k]][-val_idx, ],
         srvx1_tst = srvx1[[k]][-val_idx, ],
+        chf_val = chf[[k]][val_idx, ],
+        chfx0_val = chfx0[[k]][val_idx, ],
+        chfx1_val = chfx1[[k]][val_idx, ],
+        chf_tst = chf[[k]][-val_idx, ],
+        chfx0_tst = chfx0[[k]][-val_idx, ],
+        chfx1_tst = chfx1[[k]][-val_idx, ],
         time_interest = time_interest
       )
       
