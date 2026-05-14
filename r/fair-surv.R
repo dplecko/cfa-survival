@@ -22,8 +22,8 @@ cv_xgb <- function(df, y, weights = NULL, ...) {
     prediction = TRUE,
     verbose = FALSE, ...
   )
-  
-  return(cv$pred)
+
+  return(as.vector(cv$cv_predict$pred))
 }
 
 chf_01 <- function(data, X, time_var, event_var, rhs, method, time_interest,

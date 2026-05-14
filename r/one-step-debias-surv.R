@@ -30,7 +30,7 @@ cv_xgb_surv <- function(df, y, weights = NULL, ...) {
   xgb <- xgb.train(
     params = params,
     data = dtrain,
-    nrounds = cv$best_iteration,
+    nrounds = cv$early_stop$best_iteration,
     verbose = FALSE, ...
   )
   attr(xgb, "binary") <- binary
@@ -48,7 +48,8 @@ pred_xgb_surv <- function(xgb, df_test, intervention = NULL, X = "X") {
   predict(xgb, as.matrix(df_test))
 }
 
-cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest, ...) {
+cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest, 
+                           martingale_debias, corrupt_S, corrupt_G, ...) {
   
   if (length(Z) == 0 & length(W) == 0) {
     
@@ -103,6 +104,38 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest, ..
     rhs = xzw_rhs, time_interest = tgrid,
     balance_groups = FALSE, split_forest = FALSE, folds = fld_lst, ...
   )
+  
+  # ---- nuisance corruption: marginal KM replaces conditional fits ----
+  if (corrupt_S || corrupt_G) {
+    km_eval <- function(times, events, tgrid) {
+      sf <- survival::survfit(survival::Surv(times, events) ~ 1)
+      fn <- stepfun(sf$time, c(1, sf$surv), right = FALSE)
+      pmax(fn(tgrid), 1e-6)
+    }
+    for (i in seq_len(K)) {
+      trn <- fld_lst[[i]]$dev | fld_lst[[i]]$val
+      n_tst <- sum(fld_lst[[i]]$tst); n_val <- sum(fld_lst[[i]]$val)
+      
+      if (corrupt_S) {
+        s_vec <- km_eval(data[[time_var]][trn], data[[event_var]][trn], tgrid)
+        Mt <- matrix(s_vec, n_tst, length(tgrid), byrow = TRUE)
+        Mv <- matrix(s_vec, n_val, length(tgrid), byrow = TRUE)
+        s_xzw_mod[[i]]$srv_tst   <- Mt
+        s_xzw_mod[[i]]$srvx0_tst <- Mt; s_xzw_mod[[i]]$srvx1_tst <- Mt
+        s_xzw_mod[[i]]$srvx0_val <- Mv; s_xzw_mod[[i]]$srvx1_val <- Mv
+        s_xz_mod[[i]]$srv_tst    <- Mt
+        s_xz_mod[[i]]$srvx0_tst  <- Mt; s_xz_mod[[i]]$srvx1_tst <- Mt
+        s_xz_mod[[i]]$srvx0_val  <- Mv; s_xz_mod[[i]]$srvx1_val <- Mv
+      }
+      if (corrupt_G) {
+        g_vec <- km_eval(data[[time_var]][trn], 1L - data[[event_var]][trn], tgrid)
+        Mt <- matrix(g_vec,        n_tst, length(tgrid), byrow = TRUE)
+        Ht <- matrix(-log(g_vec),  n_tst, length(tgrid), byrow = TRUE)
+        g_xzw_mod[[i]]$srv_tst <- Mt
+        g_xzw_mod[[i]]$chf_tst <- Ht
+      }
+    }
+  }
   
   # time-resolved outcomes are needed
   if (!is_cr) {
@@ -184,7 +217,6 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest, ..
         ri_adj[[t]][tst] <- 
           (data[[time_var]][tst] > tgrid[t]) / g_xzw_mod[[i]][["srv_tst"]][, t]
         
-        martingale_debias <- TRUE
         if (martingale_debias) {
           
           S_t <- s_xzw_mod[[i]][["srv_tst"]][, t]
@@ -420,9 +452,12 @@ measure_spec <- function() {
 
 one_step_debias_surv <- function(data, X, Z, W, time_var, event_var, 
                                  time_interest = NULL, eps_trim = 0, 
-                                 copula = NULL, tau_grid = 0, ...) {
+                                 copula = NULL, tau_grid = 0, 
+                                 martingale_debias = TRUE, 
+                                 corrupt_S = FALSE, corrupt_G = FALSE, ...) {
   
-  cfit <- cross_fit_surv(data, X, Z, W, time_var, event_var, time_interest, ...)
+  cfit <- cross_fit_surv(data, X, Z, W, time_var, event_var, time_interest, 
+                         martingale_debias, corrupt_S, corrupt_G, ...)
   pso <- pso_diff_surv(cfit, data, X, Z, W, time_var, event_var, ...)
   
   # get extreme propensity weights

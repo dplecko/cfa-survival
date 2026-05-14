@@ -15,7 +15,8 @@ n_cores <- function() {
   )
 }
 
-options(rf.cores=n_cores(), mc.cores=n_cores(), ranger.num.threads=n_cores())
+options(rf.cores = 1, mc.cores = n_cores())   # rfsrc=1 inner; mclapply=N outer
+data.table::setDTthreads(1)
 
 if (!all(vapply(pkgs, requireNamespace, logical(1L)))) {
   stop("Packages {pkgs} are required in order to proceed.")

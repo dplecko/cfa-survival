@@ -27,6 +27,7 @@ gen_surv <- function(n, k=3, pz=3, q=2,
                      # C params (indep log-normal) with different coefs
                      C_par = list(mu0=0.3, muX=-0.2, muZ=rnorm(pz,0,0.2), 
                                   muW=rnorm(q,0.2,0.2), sT=1, winsL = 0),
+                     pW = NULL,
                      seed=NULL){
   if(!is.null(seed)) set.seed(seed)
   stopifnot(MASS)
@@ -45,7 +46,7 @@ gen_surv <- function(n, k=3, pz=3, q=2,
   X <- rbinom(n, 1, p)
   
   # W = B^T Z + eps_W + M*(alpha*X)  (mixture switch M)
-  pW <- runif(1, 0.6, 0.75)
+  if (is.null(pW)) pW <- runif(1, 0.6, 0.75)
   MW <- rbinom(n, 1, pW)
 
   EW <- matrix(rnorm(n*q, 0, rep(sW, each=n)), n, q)
