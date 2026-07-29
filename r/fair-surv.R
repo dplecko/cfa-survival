@@ -436,9 +436,12 @@ cif_copula_single <- function(cif1, cif2, copula, tau) {
     
     if (any(is.nan(c(chat_ilwr, chat_iupr, shat_ilwr, shat_iupr)))) browser()
     
-    # Step 3: take the midpoint of the two bounds
-    chat[i] <- 0.5 * (chat_ilwr + chat_iupr)
-    shat[i] <- 0.5 * (shat_ilwr + shat_iupr)
+    # Step 3: midpoint in \varphi (generator) space
+    phi_s <- 0.5 * (gen(shat_ilwr) + gen(shat_iupr))
+    phi_c <- gen(srv[i]) - phi_s
+    
+    shat[i] <- inv_gen(phi_s)
+    chat[i] <- inv_gen(phi_c)
   }
   
   shat[-1]

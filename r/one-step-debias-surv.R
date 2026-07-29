@@ -306,34 +306,22 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
       
       if (!is_cr) {
         
-        if (xw == xy) {
-          
-          ey_nest[[xw+1]][[xy+1]][[t]][tst] <- y_xz[[xy+1]][[t]][tst]
-        } else {
-          
-          # re-fitting needed
-          y_tilde <- s_xz_mod[[i]][[paste0("srvx", xy, "_val")]][, t]
-          mod_nested <- cv_xgb_surv(data[val, c(X, Z), with=F], y_tilde, ...)
-          ey_nest[[xw+1]][[xy+1]][[t]][tst] <- 
-            pred_xgb_surv(mod_nested, data[tst, c(X, Z), with=F],
-                          intervention = xw, X = X)
-        }
+        # re-fitting needed
+        y_tilde <- s_xzw_mod[[i]][[paste0("srvx", xy, "_val")]][, t]
+        mod_nested <- cv_xgb_surv(data[val, c(X, Z), with=F], y_tilde, ...)
+        ey_nest[[xw+1]][[xy+1]][[t]][tst] <-
+          pred_xgb_surv(mod_nested, data[tst, c(X, Z), with=F],
+                        intervention = xw, X = X)
       } else {
         
         for (j in seq_len(nlvls)) {
           
-          if (xw == xy) {
-            
-            ey_nest[[xw+1]][[xy+1]][[t]][[j]][tst] <- y_xz[[xy+1]][[t]][[j]][tst]
-          } else {
-            
-            # re-fitting needed
-            y_tilde <- s_xz_mod[[i]][[paste0("cifx", xy, "_val")]][, t, j]
-            mod_nested <- cv_xgb_surv(data[val, c(X, Z), with=F], y_tilde, ...)
-            ey_nest[[xw+1]][[xy+1]][[t]][[j]][tst] <- 
-              pred_xgb_surv(mod_nested, data[tst, c(X, Z), with=F],
-                            intervention = xw, X = X)
-          }
+          # re-fitting needed
+          y_tilde <- s_xzw_mod[[i]][[paste0("cifx", xy, "_val")]][, t, j]
+          mod_nested <- cv_xgb_surv(data[val, c(X, Z), with=F], y_tilde, ...)
+          ey_nest[[xw+1]][[xy+1]][[t]][[j]][tst] <-
+            pred_xgb_surv(mod_nested, data[tst, c(X, Z), with=F],
+                          intervention = xw, X = X)
         }
       }
     }

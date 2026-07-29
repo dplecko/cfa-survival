@@ -33,18 +33,19 @@ draw <- function(n, seed) {
            pW=dgm$pW, seed=seed)
 }
 
-# ---- eval times: 25/50/75% of marginal T (from large reference) ----
-g_ref  <- draw(n = 1e5, seed = 7777)
-q_times <- as.numeric(quantile(g_ref$data$T, c(0.25, 0.5, 0.75)))
+effects <- c("tv", "ctfde", "ctfie", "ctfse")
 
-# fine grid for the xi_2 Riemann integral; include q_times exactly
-t_hi      <- as.numeric(quantile(g_ref$data$event_time, 0.95))
-fine_grid <- sort(unique(c(seq(0.05, t_hi, length.out = 80), q_times)))
+# choose evaluation times and integration grid
+g_ref <- draw(n = 1e5, seed = 7777)
+q_times <- round(as.numeric(quantile(g_ref$data$T, c(0.25, 0.5, 0.75))), 10)
+t_hi <- max(q_times, as.numeric(quantile(g_ref$data$event_time, 0.95)))
+fine_grid <- sort(unique(round(c(seq(0.05, t_hi, length.out = 80), q_times), 10)))
+rm(g_ref); gc()
 
-# ---- population ground truth (computed once on the reference) ----
-gt <- ground_truth(g_ref, q_times)
-gt <- gt[effect %in% c("tv","ctfde","ctfie","ctfse"),
-         .(effect, time_interest, gt = value)]
+# independent population truth
+g_truth <- draw(n = 1e6, seed = 888888)
+gt <- ground_truth(g_truth, q_times)[effect %in% effects, .(effect, time_interest, gt = value)]
+rm(g_truth); gc()
 
 # ---- conditions ----
 conditions <- list(
@@ -91,8 +92,11 @@ run_one <- function(idx) {
   g  <- draw(n = n_i, seed = sd_i)
   df <- as.data.table(g$data)
   
+  learner_seed <- 1e6L + 1000L * match(n_i, n_grid) + sd_i
+  
   rows <- list()
   for (cnd in conditions) {
+    set.seed(learner_seed)
     dr_obj <- tryCatch(
       one_step_debias_surv(
         df, X, Z, W, time_var = "event_time", event_var = "event",
@@ -104,11 +108,10 @@ run_one <- function(idx) {
     )
     if (is.null(dr_obj)) next
     
-    est <- dr_obj$measures[effect %in% c("tv","ctfde","ctfie","ctfse")]
-    est_q <- rbindlist(lapply(q_times, function(tt) {
-      sub <- est[, .SD[which.min(abs(time_interest - tt))], by = effect]
-      sub[, time_interest := tt]; sub
-    }))
+    est <- dr_obj$measures[effect %in% effects]
+    est[, time_interest := round(time_interest, 10)]
+    est_q <- est[time_interest %in% q_times]
+    stopifnot(nrow(est_q) == length(effects) * length(q_times))
     est_q[, `:=`(n = n_i, seed = sd_i, condition = cnd$name)]
     rows[[length(rows) + 1]] <-
       est_q[, .(n, seed, condition, effect, time_interest, value)]
@@ -121,45 +124,75 @@ run_one <- function(idx) {
   bind
 }
 
-res_list <- mclapply(
-  seq_len(nrow(work)), run_one,
-  mc.cores       = NCORES,
-  mc.preschedule = FALSE,   # uneven task durations → schedule on demand
-  mc.set.seed    = FALSE    # we set seed via draw(), don't want mc to override
-)
-res <- rbindlist(res_list)
+invisible(mclapply(seq_len(nrow(work)), run_one, mc.cores = NCORES,
+                   mc.preschedule = FALSE, mc.set.seed = FALSE))
 
-# ---- used if the chunks are already available ----
-# res <- rbindlist(lapply(
-#   list.files(out_path, pattern = "^part_n.*\\.rds$", full.names = TRUE),
-#   readRDS
-# ))
-
-# ---- RMSE and slopes ----
-res  <- merge(res, gt, by = c("effect","time_interest"))
-res[, sq_err := (value - gt)^2]
-
-rmse <- res[, .(rmse = sqrt(mean(sq_err)), nrep = .N),
-            by = .(n, condition, effect, time_interest)]
-rmse[, `:=`(log_n = log(n), log_rmse = log(rmse))]
-
-slopes <- rmse[, .(slope = coef(lm(log_rmse ~ log_n))[2]),
-               by = .(condition, effect, time_interest)]
-
-saveRDS(list(raw = res, rmse = rmse, slopes = slopes, gt = gt,
-             q_times = q_times, dgm = dgm),
-        file.path(out_path, "pilot_summary.rds"))
+part_files <- list.files(out_path, pattern = "^part_n.*\\.rds$", full.names = TRUE)
+stopifnot(length(part_files) == nrow(work))
+res <- rbindlist(lapply(part_files, readRDS))
+stopifnot(nrow(res) == nrow(work) * length(conditions) * length(effects) * length(q_times))
 
 # ---- plot ----
-rmse[, t_lbl := factor(sprintf("t=%.2f", time_interest))]
-p <- ggplot(rmse, aes(x = log_n, y = log_rmse, color = condition)) +
-  geom_line() + geom_point() +
-  facet_grid(effect ~ t_lbl, scales = "free_y") +
-  theme_bw() +
-  labs(x = "log n", y = "log RMSE",
-       title = "DR verification: log-RMSE vs log-n",
-       subtitle = sprintf("frozen DGM (seed %d), %d seeds/n", DGM_SEED, n_seeds))
-ggsave(file.path(out_path, "pilot_logrmse.png"),
-       plot = p, width = 11, height = 8)
+# obj <- readRDS(file.path(out_path, "pilot_summary.rds"))
+# rmse <- obj$rmse
+# rmse[, t_lbl := factor(sprintf("t=%.2f", time_interest))]
+# p <- ggplot(rmse, aes(x = log_n, y = log_rmse, color = condition)) +
+#   geom_line() + geom_point() +
+#   facet_grid(effect ~ t_lbl, scales = "free_y") +
+#   theme_bw() +
+#   labs(x = "log n", y = "log RMSE",
+#        title = "DR verification: log-RMSE vs log-n",
+#        subtitle = sprintf("frozen DGM (seed %d), %d seeds/n", DGM_SEED, n_seeds))
+# ggsave(file.path(out_path, "pilot_logrmse.png"),
+#        plot = p, width = 11, height = 8)
+# 
+# print(obj$slopes)
 
-print(slopes)
+# library(ggplot2); library(data.table)
+# 
+# obj  <- readRDS(file.path(out_path, "pilot_summary.rds"))
+# rmse <- copy(obj$rmse)
+# 
+# rmse[, augmentation := fifelse(grepl("^mart_on", condition),
+#                                "DR (augmented)", "IPCW only")]
+# rmse[, nuisance := fcase(
+#   grepl("clean",     condition), "S ok, G ok",
+#   grepl("Swrong",    condition), "S wrong, G ok",
+#   grepl("Gwrong",    condition) & !grepl("both", condition), "S ok, G wrong",
+#   grepl("bothwrong", condition), "S wrong, G wrong"
+# )]
+# rmse[, nuisance := factor(nuisance, levels = c(
+#   "S ok, G ok","S wrong, G ok","S ok, G wrong","S wrong, G wrong"))]
+# rmse[, augmentation := factor(augmentation,
+#                               levels = c("IPCW only","DR (augmented)"))]
+# rmse[, effect := factor(effect, levels = c("tv","ctfde","ctfie","ctfse"),
+#                         labels = c("TV","Ctf-DE","Ctf-IE","Ctf-SE"))]
+# 
+# # drop the late-time quantile — IPCW variance explodes; story is told at t1, t2
+# # rmse <- rmse[time_interest <= quantile(rmse$time_interest, 0.67)]
+# rmse[, t_lbl := sprintf("t = %.2f", time_interest)]
+# 
+# p <- ggplot(rmse, aes(x = log_n, y = log_rmse,
+#                       color = nuisance, linetype = augmentation,
+#                       shape = augmentation,
+#                       group = interaction(nuisance, augmentation))) +
+#   geom_line(linewidth = 0.7) +
+#   geom_point(size = 2) +
+#   facet_wrap(effect ~ t_lbl, scales = "free_y", ncol = 3) +
+#   scale_color_manual("Nuisance status",
+#                      values = c("S ok, G ok"       = "#1b9e77",   # green
+#                                 "S wrong, G ok"    = "#e6ab02",   # darker yellow/gold
+#                                 "S ok, G wrong"    = "#f4d03f",   # lighter yellow
+#                                 "S wrong, G wrong" = "#d62728")) +
+#   scale_linetype_manual("Augmentation", values = c("dashed","solid")) +
+#   scale_shape_manual("Augmentation", values = c(1, 16)) +
+#   theme_bw(base_size = 12) +
+#   theme(legend.position = "bottom", legend.box = "vertical",
+#         panel.grid.minor = element_blank(),
+#         strip.text = element_text(size = 9)) +
+#   labs(x = expression(log(n)), y = expression(log(RMSE)),
+#        title = "Double-robustness verification",
+#        subtitle = "log-RMSE vs log-n, frozen DGM, 64 seeds per n")
+# 
+# ggsave(file.path(out_path, "pilot_logrmse.png"),
+#        plot = p, width = 11, height = 12, dpi = 150)

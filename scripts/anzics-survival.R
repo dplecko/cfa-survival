@@ -35,11 +35,11 @@ if (local) {
 tgrid <- c(1:10, 14, 28, 56, 90, 180)
 
 # model-based estimation
-fsurv <- fair_surv(dat_run, X, Z, W, time_var, event_var,
-                   method = "rfs-cf", nboot = 1,
-                   copula = if (out == "readm") "frank" else NULL,
-                   time_interest = 100,
-                   tau_grid = if (out == "readm") c(0.1, 0.5, 0.8) else NULL)
+# fsurv <- fair_surv(dat_run, X, Z, W, time_var, event_var,
+#                    method = "rfs-cf", nboot = 1,
+#                    copula = if (out == "readm") "frank" else NULL,
+#                    time_interest = 100,
+#                    tau_grid = if (out == "readm") c(0.1, 0.5, 0.8) else NULL)
 
 
 # doubly robust estimation
