@@ -1,6 +1,6 @@
 
 root <- rprojroot::find_root(rprojroot::has_file(".gitignore"))
-pkgs <- c("data.table", "ggplot2", "ricu", "randomForestSRC", "zeallot",
+pkgs <- c("data.table", "ggplot2", "randomForestSRC", "zeallot",
           "xgboost", "survival", "parallel", "abind", "VineCopula",
           "assertthat")
 
@@ -15,7 +15,16 @@ n_cores <- function() {
   )
 }
 
-options(rf.cores = 1, mc.cores = n_cores())   # rfsrc=1 inner; mclapply=N outer
+# rf.cores: OpenMP threads randomForestSRC uses per rfsrc() fit (tree-level parallelism)
+# mc.cores: default workers for parallel::mclapply() (fit-level parallelism)
+#
+# default = many independent fits in parallel (mclapply over N, rf.cores=1 each).
+# for a single large fit, set RF_CORES (and usually MC_CORES=1) to instead
+# parallelize tree growing within that one fit.
+options(
+  rf.cores = as.integer(Sys.getenv("RF_CORES", unset = "1")),
+  mc.cores = as.integer(Sys.getenv("MC_CORES", unset = n_cores()))
+)
 data.table::setDTthreads(1)
 
 if (!all(vapply(pkgs, requireNamespace, logical(1L)))) {

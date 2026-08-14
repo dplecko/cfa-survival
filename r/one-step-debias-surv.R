@@ -49,7 +49,7 @@ pred_xgb_surv <- function(xgb, df_test, intervention = NULL, X = "X") {
 }
 
 cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest, 
-                           martingale_debias, corrupt_S, corrupt_G, ...) {
+                           martingale_debias, modify_S, modify_G, dgm, ...) {
   
   if (length(Z) == 0 & length(W) == 0) {
     
@@ -79,60 +79,165 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
   
   # outcome S/CIF via your rfs learner
   xzw_rhs <- paste(c(X, Z, W), collapse = "+")
-  s_xzw_mod <- chf_rfs_cf(
-    data = data[, c(X, Z, W, time_var, event_var), with = FALSE],
-    X = X, time_var = time_var, event_var = event_var,
-    rhs = xzw_rhs, time_interest = time_interest,
-    balance_groups = FALSE, split_forest = FALSE, folds = fld_lst, ...
-  )
-  
-  tgrid <- s_xzw_mod[[1]]$time_interest
-  
-  s_xz_mod <- chf_rfs_cf(
-    data = data[, c(X, Z, time_var, event_var), with = FALSE],
-    X = X, time_var = time_var, event_var = event_var,
-    rhs = paste(c(X, Z), collapse = "+"), time_interest = tgrid,
-    balance_groups = FALSE, split_forest = FALSE, folds = fld_lst, ...
-  )
+  if (is.null(modify_S)) {
+    s_xzw_mod <- chf_rfs_cf(
+      data = data[, c(X, Z, W, time_var, event_var), with = FALSE],
+      X = X, time_var = time_var, event_var = event_var,
+      rhs = xzw_rhs, time_interest = time_interest,
+      balance_groups = FALSE, split_forest = FALSE, folds = fld_lst, ...
+    )
+    tgrid <- s_xzw_mod[[1]]$time_interest
+  } else {
+    
+    assert_that(!is.null(time_interest), 
+                msg = "Oracle runs must have `time_interest` specified.")
+    tgrid <- time_interest
+    s_xzw_mod <- vector("list", K)
+  }
+
+  # s_xz_mod <- chf_rfs_cf(
+  #   data = data[, c(X, Z, time_var, event_var), with = FALSE],
+  #   X = X, time_var = time_var, event_var = event_var,
+  #   rhs = paste(c(X, Z), collapse = "+"), time_interest = tgrid,
+  #   balance_groups = FALSE, split_forest = FALSE, folds = fld_lst, ...
+  # )
   
   # censoring G(t): flip event to "censoring event" (1 if censored)
   dG <- copy(data)
   dG[[event_var]] <- as.integer(dG[[event_var]] == 0L)
-  g_xzw_mod <- chf_rfs_cf(
-    data = dG[, c(X, Z, W, time_var, event_var), with = FALSE],
-    X = X, time_var = time_var, event_var = event_var,
-    rhs = xzw_rhs, time_interest = tgrid,
-    balance_groups = FALSE, split_forest = FALSE, folds = fld_lst, ...
-  )
   
-  # ---- nuisance corruption: marginal KM replaces conditional fits ----
-  if (corrupt_S || corrupt_G) {
+  if (is.null(modify_G)) {
+    
+    g_xzw_mod <- chf_rfs_cf(
+      data = dG[, c(X, Z, W, time_var, event_var), with = FALSE],
+      X = X, time_var = time_var, event_var = event_var,
+      rhs = xzw_rhs, time_interest = tgrid,
+      balance_groups = FALSE, split_forest = FALSE, folds = fld_lst, ...
+    )
+  } else {
+    
+    g_xzw_mod <- vector("list", K)
+  }
+  
+  # ---- nuisance modification: marginal KM corruption or oracle truth ----
+  if (TRUE) {
+    
+    # first computing the corruptions / ground truth
+    if (!is.null(modify_S)) assert_that(modify_S %in% c("corrupt", "oracle"))
+    if (!is.null(modify_G)) assert_that(modify_G %in% c("corrupt", "oracle"))
+    
     km_eval <- function(times, events, tgrid) {
       sf <- survival::survfit(survival::Surv(times, events) ~ 1)
       fn <- stepfun(sf$time, c(1, sf$surv), right = FALSE)
       pmax(fn(tgrid), 1e-6)
     }
-    for (i in seq_len(K)) {
-      trn <- fld_lst[[i]]$dev | fld_lst[[i]]$val
-      n_tst <- sum(fld_lst[[i]]$tst); n_val <- sum(fld_lst[[i]]$val)
+    
+    # oracle S(t | X,Z,W) / CIF_k(t | X,Z,W), and their counterfactuals
+    # under X:=x (unit's own factual Z,W throughout, only X intervened)
+    if (is_cr) {
+
+      x1_ind <- data[[X]] == 1
+      cifx0 <- array(0, dim = c(n, length(tgrid), nlvls))
+      cifx1 <- array(0, dim = c(n, length(tgrid), nlvls))
+
+      for (j in seq_len(nlvls)) {
+        c_true <- CIF_conditional_exact(dgm, tgrid, event = j)
+        cifx0[, , j] <- c_true$cifx0
+        cifx1[, , j] <- c_true$cifx1
+      }
+
+      cif <- cifx0
+      cif[x1_ind, , ] <- cifx1[x1_ind, , ]
+
+      srvx0 <- 1 - apply(cifx0, c(1, 2), sum)
+      srvx1 <- 1 - apply(cifx1, c(1, 2), sum)
+      srv <- srvx0
+      srv[x1_ind, ] <- srvx1[x1_ind, ]
       
-      if (corrupt_S) {
-        s_vec <- km_eval(data[[time_var]][trn], data[[event_var]][trn], tgrid)
+      # browser()
+      # attenuation check (Browse, one fold, t=50, j=2) using the exact oracle:
+      # d_hat <- s_xzw_mod[[1]]$cifx1_tst[,50,2] - s_xzw_mod[[1]]$cifx0_tst[,50,2]
+      # d_or  <- cifx1[fld_lst[[1]]$tst,50,2]    - cifx0[fld_lst[[1]]$tst,50,2]
+      # c(atten = mean(d_hat)/mean(d_or), cor = cor(d_hat, d_or))
+      # s_xzw_mod[[1]]$cif_tst[, , 2]
+      # cif[fld_lst[[1]]$tst, , 2]
+      # colMeans(s_xzw_mod[[1]]$cif_tst[, , 2] - cif[fld_lst[[1]]$tst, , 2])
+      # s <- s_xzw_mod[[1]]$cif_tst[, , 2]
+      # o <- cif[fld_lst[[1]]$tst, , 2]
+      # plot(s_xzw_mod[[1]]$cif_tst[, 50, 2], cif[fld_lst[[1]]$tst, 50, 2])
+      # quantile(abs(s_xzw_mod[[1]]$cif_tst[, 50, 2] - cif[fld_lst[[1]]$tst, 50, 2]))
+
+    } else {
+
+      x1_ind <- data[[X]] == 1
+      s_true <- S_T_potential_curves_from_gen(dgm, tgrid)
+
+      srvx0 <- s_true[["S_x0_wx0"]]
+      srvx0[x1_ind, ] <- s_true[["S_x0_wx1"]][x1_ind, ]
+
+      srvx1 <- s_true[["S_x1_wx0"]]
+      srvx1[x1_ind, ] <- s_true[["S_x1_wx1"]][x1_ind, ]
+
+      srv <- srvx0
+      srv[x1_ind, ] <- srvx1[x1_ind, ]
+    }
+    
+    # oracle G(t | X,Z,W)
+    g_true <- ground_truth_G(dgm, tgrid)
+    h_true <- -log(pmax(g_true, 1e-6))
+    
+    for (i in seq_len(K)) {
+      
+      dev <- fld_lst[[i]]$dev
+      val <- fld_lst[[i]]$val
+      tst <- fld_lst[[i]]$tst
+      
+      n_tst <- sum(tst)
+      n_val <- sum(val)
+      
+      if (identical(modify_S, "corrupt")) {
+        
+        s_vec <- km_eval(data[[time_var]][dev], data[[event_var]][dev], tgrid)
         Mt <- matrix(s_vec, n_tst, length(tgrid), byrow = TRUE)
         Mv <- matrix(s_vec, n_val, length(tgrid), byrow = TRUE)
-        s_xzw_mod[[i]]$srv_tst   <- Mt
-        s_xzw_mod[[i]]$srvx0_tst <- Mt; s_xzw_mod[[i]]$srvx1_tst <- Mt
-        s_xzw_mod[[i]]$srvx0_val <- Mv; s_xzw_mod[[i]]$srvx1_val <- Mv
-        s_xz_mod[[i]]$srv_tst    <- Mt
-        s_xz_mod[[i]]$srvx0_tst  <- Mt; s_xz_mod[[i]]$srvx1_tst <- Mt
-        s_xz_mod[[i]]$srvx0_val  <- Mv; s_xz_mod[[i]]$srvx1_val <- Mv
+        
+        s_xzw_mod[[i]]$srv_tst <- Mt
+        s_xzw_mod[[i]]$srvx0_tst <- Mt
+        s_xzw_mod[[i]]$srvx1_tst <- Mt
+        s_xzw_mod[[i]]$srvx0_val <- Mv
+        s_xzw_mod[[i]]$srvx1_val <- Mv
+        
+      } else if (identical(modify_S, "oracle") && is_cr) {
+
+        s_xzw_mod[[i]]$srv_tst <- srv[tst, ]
+        s_xzw_mod[[i]]$cif_tst <- cif[tst, , ]
+        s_xzw_mod[[i]]$cifx0_tst <- cifx0[tst, , ]
+        s_xzw_mod[[i]]$cifx1_tst <- cifx1[tst, , ]
+        s_xzw_mod[[i]]$cifx0_val <- cifx0[val, , ]
+        s_xzw_mod[[i]]$cifx1_val <- cifx1[val, , ]
+
+      } else if (identical(modify_S, "oracle")) {
+
+        s_xzw_mod[[i]]$srv_tst <- srv[tst, ]
+        s_xzw_mod[[i]]$srvx0_tst <- srvx0[tst, ]
+        s_xzw_mod[[i]]$srvx1_tst <- srvx1[tst, ]
+        s_xzw_mod[[i]]$srvx0_val <- srvx0[val, ]
+        s_xzw_mod[[i]]$srvx1_val <- srvx1[val, ]
       }
-      if (corrupt_G) {
-        g_vec <- km_eval(data[[time_var]][trn], 1L - data[[event_var]][trn], tgrid)
-        Mt <- matrix(g_vec,        n_tst, length(tgrid), byrow = TRUE)
-        Ht <- matrix(-log(g_vec),  n_tst, length(tgrid), byrow = TRUE)
+      
+      if (identical(modify_G, "corrupt")) {
+        
+        g_vec <- km_eval(data[[time_var]][dev], 1L - data[[event_var]][dev], tgrid)
+        Mt <- matrix(g_vec, n_tst, length(tgrid), byrow = TRUE)
+        Ht <- matrix(-log(g_vec), n_tst, length(tgrid), byrow = TRUE)
+        
         g_xzw_mod[[i]]$srv_tst <- Mt
         g_xzw_mod[[i]]$chf_tst <- Ht
+        
+      } else if (identical(modify_G, "oracle")) {
+        
+        g_xzw_mod[[i]]$srv_tst <- g_true[tst, ]
+        g_xzw_mod[[i]]$chf_tst <- h_true[tst, ]
       }
     }
   }
@@ -152,8 +257,8 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
     ri_adj <- tres
   }
   
-  y_xzw <- y_xz <- list(tres, tres)
-  ey_nest <- list(list(tres, tres), list(tres, tres))
+  y_xzw <- y_xzw_ora <- list(tres, tres)
+  ey_nest <- ey_nest_ora <- list(list(tres, tres), list(tres, tres))
   
   # P(x | ...) elements to be filled
   px_z <- px_zw <- list(rep(NA, n), rep(NA, n))
@@ -210,6 +315,37 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
     S_M <- s_xzw_mod[[i]][["srv_tst"]][cbind(seq_along(Mt), Mt)]
     G_M <- g_xzw_mod[[i]][["srv_tst"]][cbind(seq_along(Mt), Mt)]
     xi2_int <- 0
+    
+    zeta2_A <- rep(0, sum(tst))
+    zeta2_B <- matrix(0, nrow = sum(tst), ncol = nlvls)
+    
+    if (is_cr) {
+      
+      cif_tst <- s_xzw_mod[[i]][["cif_tst"]]
+      s_all_tst <- s_xzw_mod[[i]][["srv_tst"]]
+      g_tst <- g_xzw_mod[[i]][["srv_tst"]]
+      h_c_tst <- g_xzw_mod[[i]][["chf_tst"]]
+      
+      # Grid approximation to F_j(M-) and S_all(M-)
+      m_idx <- findInterval(M_tst, tgrid)
+      has_m_idx <- m_idx > 0
+      
+      s_m_minus <- rep(1, length(M_tst))
+      s_m_minus[has_m_idx] <-
+        s_all_tst[cbind(which(has_m_idx), m_idx[has_m_idx])]
+      
+      cif_m_minus <- matrix(
+        0,
+        nrow = length(M_tst),
+        ncol = nlvls
+      )
+      
+      for (j in seq_len(nlvls)) {
+        cif_m_minus[has_m_idx, j] <-
+          cif_tst[cbind(which(has_m_idx), m_idx[has_m_idx], j)]
+      }
+    }
+    
     for (t in seq_along(tgrid)) {
       
       if (!is_cr) {
@@ -238,23 +374,79 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
           
           y_xzw[[xy + 1]][[t]][tst] <- 
             s_xzw_mod[[i]][[paste0("srvx", xy, "_tst")]][, t]
-          y_xz[[xy + 1]][[t]][tst] <- 
-            s_xz_mod[[i]][[paste0("srvx", xy, "_tst")]][, t]
+          # y_xz[[xy + 1]][[t]][tst] <- 
+          #   s_xz_mod[[i]][[paste0("srvx", xy, "_tst")]][, t]
         }
       } else {
         
+        if (martingale_debias) {
+          
+          G_t <- pmax(g_tst[, t], 1e-6)
+          dH <- h_c_tst[, t] -
+            if (t == 1) 0 else h_c_tst[, t - 1]
+          
+          S_left <- if (t == 1) {
+            rep(1, sum(tst))
+          } else {
+            s_all_tst[, t - 1]
+          }
+          S_left <- pmax(S_left, 1e-6)
+          
+          zeta_weight <-
+            (M_tst >= tgrid[t]) * dH / (G_t * S_left)
+          
+          zeta2_A <- zeta2_A + zeta_weight
+          
+          for (j in seq_len(nlvls)) {
+            
+            F_left <- if (t == 1) {
+              rep(0, sum(tst))
+            } else {
+              cif_tst[, t - 1, j]
+            }
+            
+            zeta2_B[, j] <-
+              zeta2_B[, j] + zeta_weight * F_left
+          }
+        }
+        
         for (j in seq_len(nlvls)) {
           
-          ri_adj[[t]][[j]][tst] <- 
-            (data[[time_var]][tst] <= tgrid[t] & data[[event_var]][tst] == j) / 
-            gm_xzw[tst]
+          F_t <- cif_tst[, t, j]
+          
+          # IPCW event term
+          ri_adj[[t]][[j]][tst] <-
+            (M_tst <= tgrid[t] &
+               data[[event_var]][tst] == j) /
+            pmax(gm_xzw[tst], 1e-6)
+          
+          if (martingale_debias) {
+            
+            # Censoring-event jump term
+            zeta1 <-
+              (M_tst <= tgrid[t] &
+                 data[[event_var]][tst] == 0) /
+              pmax(gm_xzw[tst], 1e-6) *
+              (F_t - cif_m_minus[, j]) /
+              pmax(s_m_minus, 1e-6)
+            
+            # Continuous censoring augmentation
+            zeta2 <- F_t * zeta2_A - zeta2_B[, j]
+            
+            ri_adj[[t]][[j]][tst] <-
+              ri_adj[[t]][[j]][tst] + zeta1 - zeta2
+          }
           
           for (xy in c(0, 1)) {
             
-            y_xzw[[xy + 1]][[t]][[j]][tst] <- 
+            y_xzw[[xy + 1]][[t]][[j]][tst] <-
               s_xzw_mod[[i]][[paste0("cifx", xy, "_tst")]][, t, j]
-            y_xz[[xy + 1]][[t]][[j]][tst] <- 
-              s_xz_mod[[i]][[paste0("cifx", xy, "_tst")]][, t, j]
+            
+            if (!identical(modify_S, "oracle") && is_cr) {
+              
+              cif_ora <- if (xy == 1) cifx1[tst, , ] else cifx0[tst, , ]
+              y_xzw_ora[[xy + 1]][[t]][[j]][tst] <- cif_ora[, t, j]
+            }
           }
         }
       }
@@ -302,38 +494,52 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
     }
     
     # if (true_nuiss) next
-    for (t in seq_along(tgrid)) for (xw in c(0, 1)) for (xy in c(0, 1)) {
+    for (t in seq_along(tgrid)) for (xy in c(0, 1)) {
       
       if (!is_cr) {
         
-        # re-fitting needed
         y_tilde <- s_xzw_mod[[i]][[paste0("srvx", xy, "_val")]][, t]
         mod_nested <- cv_xgb_surv(data[val, c(X, Z), with=F], y_tilde, ...)
-        ey_nest[[xw+1]][[xy+1]][[t]][tst] <-
-          pred_xgb_surv(mod_nested, data[tst, c(X, Z), with=F],
-                        intervention = xw, X = X)
+        for (xw in c(0, 1))
+          ey_nest[[xw+1]][[xy+1]][[t]][tst] <-
+          pred_xgb_surv(mod_nested, data[tst, c(X, Z), with=F], intervention=xw, X=X)
       } else {
         
         for (j in seq_len(nlvls)) {
           
-          # re-fitting needed
+          
+          #' TODO: remove this temporary oracle
+          # oracle ey_nest
+          if (!identical(modify_S, "oracle")) {
+            
+            cif_ora <- if (xy == 1) cifx1[val, ,] else cifx0[val, ,]
+            y_tilde_ora <- cif_ora[, t, j]
+            mod_nested_ora <- cv_xgb_surv(data[val, c(X, Z), with=F], y_tilde_ora, ...)
+            for (xw in c(0, 1))
+              ey_nest_ora[[xw+1]][[xy+1]][[t]][[j]][tst] <-
+              pred_xgb_surv(mod_nested_ora, data[tst, c(X, Z), with=F], intervention=xw, X=X) 
+          }
+          
+          # estimated ey_nest
           y_tilde <- s_xzw_mod[[i]][[paste0("cifx", xy, "_val")]][, t, j]
           mod_nested <- cv_xgb_surv(data[val, c(X, Z), with=F], y_tilde, ...)
-          ey_nest[[xw+1]][[xy+1]][[t]][[j]][tst] <-
-            pred_xgb_surv(mod_nested, data[tst, c(X, Z), with=F],
-                          intervention = xw, X = X)
+          for (xw in c(0, 1))
+            ey_nest[[xw+1]][[xy+1]][[t]][[j]][tst] <-
+            pred_xgb_surv(mod_nested, data[tst, c(X, Z), with=F], intervention=xw, X=X)
         }
       }
     }
+    
   }
 
   list(
     ria = ri_adj,
     y_xzw = y_xzw,
-    y_xz = y_xz,
+    y_xzw_ora = y_xzw_ora,
     px_z = px_z,
     px_zw = px_zw,
     ey_nest = ey_nest,
+    ey_nest_ora = ey_nest_ora,
     tgrid = tgrid,
     is_cr = is_cr,
     nlvls = nlvls,
@@ -348,10 +554,11 @@ pso_diff_surv <- function(cfit, data, X, Z, W, time_var, event_var, ...) {
   # un-nest the cfit object
   ria <- cfit$ria
   y_xzw <- cfit$y_xzw
-  y_xz <- cfit$y_xz
+  y_xzw_ora <- cfit$y_xzw_ora
   px_z <- cfit$px_z
   px_zw <- cfit$px_zw
   ey_nest <- cfit$ey_nest
+  ey_nest_ora <- cfit$ey_nest_ora
   tgrid <- cfit$tgrid
   is_cr <- cfit$is_cr
   nlvls <- cfit$nlvls
@@ -389,7 +596,10 @@ pso_diff_surv <- function(cfit, data, X, Z, W, time_var, event_var, ...) {
           (x == xz) / mean(x == xz) * ey_nest[[xw+1]][[xy+1]][[t]]
       } else {
         
+        
         for (j in seq_len(nlvls)) {
+          
+          # if (t == 50 & j == 2) browser()
           
           pso[[xz+1]][[xw+1]][[xy+1]][[t]][[j]] <-
             
@@ -442,10 +652,11 @@ one_step_debias_surv <- function(data, X, Z, W, time_var, event_var,
                                  time_interest = NULL, eps_trim = 0, 
                                  copula = NULL, tau_grid = 0, 
                                  martingale_debias = TRUE, 
-                                 corrupt_S = FALSE, corrupt_G = FALSE, ...) {
+                                 modify_S = NULL, modify_G = NULL, 
+                                 dgm = NULL, ...) {
   
   cfit <- cross_fit_surv(data, X, Z, W, time_var, event_var, time_interest, 
-                         martingale_debias, corrupt_S, corrupt_G, ...)
+                         martingale_debias, modify_S, modify_G, dgm, ...)
   pso <- pso_diff_surv(cfit, data, X, Z, W, time_var, event_var, ...)
   
   # get extreme propensity weights
@@ -480,9 +691,10 @@ one_step_debias_surv <- function(data, X, Z, W, time_var, event_var,
   eff <- measure_spec()
   
   is_sens <- if (!is.null(copula)) TRUE else FALSE
+  res_sens <- NULL
   if (is_sens) {
 
-    res <- c()
+    res_sens <- c()
     elm <- list(
       list(mu = rep(NA, length(cfit$tgrid)), sd = rep(NA, length(cfit$tgrid))),
       list(mu = rep(NA, length(cfit$tgrid)), sd = rep(NA, length(cfit$tgrid)))
@@ -557,16 +769,18 @@ one_step_debias_surv <- function(data, X, Z, W, time_var, event_var,
         eff_upr <- shat[[xz1+1]][[xw1+1]][[xy1+1]][[tau_id]][["upr"]] -
                    shat[[xz2+1]][[xw2+1]][[xy2+1]][[tau_id]][["lwr"]]
         
-        res <- rbind(
-          res,
+        res_sens <- rbind(
+          res_sens,
           data.frame(effect = eff[[i]]$nm, value = eff_mean,
                      lwr = eff_lwr, upr = eff_upr, tau = tau_grid[tau_id],
                      time_interest = cfit$tgrid)
         )
       }
     }
-  } else { # non-sensitivity setting (classical or CR)
-    
+  }
+
+  { # classical point estimates (always computed, cheap relative to the fit)
+
     res <- c()
     for (i in seq_along(eff)) {
       
@@ -610,16 +824,56 @@ one_step_debias_surv <- function(data, X, Z, W, time_var, event_var,
               res,
               data.frame(effect = eff[[i]]$nm, value = psi_osd, sd = dev, 
                          time_interest = cfit$tgrid[t], event = j)
-            )  
+            )
           }
         }
       }
     }
   }
-  
+
+  { # raw potential-outcome cells psi(xz,xw,xy), pre-differencing -- just a
+    # summary of pso (already computed above), useful for isolating which
+    # nested counterfactual a bias comes from without re-deriving effects
+    res_po <- c()
+    for (xz in c(0, 1)) for (xw in c(0, 1)) for (xy in c(0, 1)) {
+
+      for (t in seq_along(cfit$tgrid)) {
+
+        if (!cfit$is_cr) {
+
+          pseudo_out <- pso[[xz+1]][[xw+1]][[xy+1]][[t]]
+          psi_osd <- mean(pseudo_out, na.rm = TRUE)
+          dev <- sqrt(var(pseudo_out, na.rm = TRUE) / sum(!is.na(pseudo_out)))
+
+          res_po <- rbind(
+            res_po,
+            data.frame(xz = xz, xw = xw, xy = xy, value = psi_osd, sd = dev,
+                       time_interest = cfit$tgrid[t])
+          )
+        } else {
+
+          for (j in seq_len(cfit$nlvls)) {
+
+            pseudo_out <- pso[[xz+1]][[xw+1]][[xy+1]][[t]][[j]]
+            psi_osd <- mean(pseudo_out, na.rm = TRUE)
+            dev <- sqrt(var(pseudo_out, na.rm = TRUE) / sum(!is.na(pseudo_out)))
+
+            res_po <- rbind(
+              res_po,
+              data.frame(xz = xz, xw = xw, xy = xy, value = psi_osd, sd = dev,
+                         time_interest = cfit$tgrid[t], event = j)
+            )
+          }
+        }
+      }
+    }
+  }
+
   structure(
     list(
       measures = as.data.table(res),
+      measures_sens = if (!is.null(res_sens)) as.data.table(res_sens) else NULL,
+      measures_po = as.data.table(res_po),
       is_cr = cfit$is_cr, is_sens = is_sens,
       time_interest = cfit$tgrid, copula = copula, tau_grid = tau_grid
     ), class = "fairsurv_osd"
@@ -633,10 +887,10 @@ autoplot.fairsurv_osd <- function(object, ...) {
   alpha <- 0.05 # fixed for now
   width <- qnorm(1 - alpha / 2)
   
-  plt_dat <- copy(object$measures)
+  plt_dat <- copy(if (object$is_sens) object$measures_sens else object$measures)
   plt_dat[, effect := factor(effect, levels = c("tv", "ctfde", "ctfie", "ctfse"),
           labels = c("Total Variation", "Direct", "Indirect", "Spurious"))]
-  if (object$is_sens) { # 
+  if (object$is_sens) { #
     
     # tau as linetype (assumes up to 4 tau values)
     plt_dat[, tau_f := factor(tau, levels = sort(unique(tau)))]

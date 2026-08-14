@@ -1,4 +1,13 @@
 
+# sync data from cluster
+f <- function(...) as.character(glue::glue(..., .envir = parent.frame()))
+sync_data <- function() {
+  dataset <- "survival"
+  
+  remote <- "hoffman2"
+  system(f("rsync -avz --update {remote}:{dataset}/results/ results/"))
+}
+
 # file name helpers
 fname <- function(src, out, balance, split) {
   

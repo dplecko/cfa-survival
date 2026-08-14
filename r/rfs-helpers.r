@@ -128,8 +128,10 @@ chf_rfs_cf <- function(data, X, time_var, event_var, rhs, time_interest,
       srvx1[[k]] <- predsx1$survival
     }
     
-    grid_ordx1 <- match_grids(time_interest, c(-Inf, objx1$time.interest))
-    grid_ordx0 <- match_grids(time_interest, c(-Inf, objx0$time.interest))
+    # grid_ordx1 <- match_grids(time_interest, c(-Inf, objx1$time.interest))
+    # grid_ordx0 <- match_grids(time_interest, c(-Inf, objx0$time.interest))
+    grid_ordx1 <- findInterval(time_interest, objx1$time.interest) + 1L
+    grid_ordx0 <- findInterval(time_interest, objx0$time.interest) + 1L
     
     if (is_cr) {
       
@@ -170,9 +172,6 @@ chf_rfs_cf <- function(data, X, time_var, event_var, rhs, time_interest,
       srv[[k]] <- srvx0[[k]]
       srv[[k]][val_indx1[[k]], ] <- srvx1[[k]][val_indx1[[k]], ]
       
-      chf[[k]] <- chfx0[[k]]
-      chf[[k]][val_indx1[[k]], ] <- chfx1[[k]][val_indx1[[k]], ]
-      
       ret[[k]] <- list(
         srv_val = srv[[k]][val_idx, ],
         srvx0_val = srvx0[[k]][val_idx, ],
@@ -180,21 +179,37 @@ chf_rfs_cf <- function(data, X, time_var, event_var, rhs, time_interest,
         srv_tst = srv[[k]][-val_idx, ],
         srvx0_tst = srvx0[[k]][-val_idx, ],
         srvx1_tst = srvx1[[k]][-val_idx, ],
-        chf_val = chf[[k]][val_idx, ],
-        chfx0_val = chfx0[[k]][val_idx, ],
-        chfx1_val = chfx1[[k]][val_idx, ],
-        chf_tst = chf[[k]][-val_idx, ],
-        chfx0_tst = chfx0[[k]][-val_idx, ],
-        chfx1_tst = chfx1[[k]][-val_idx, ],
         time_interest = time_interest
       )
       
-      if (is_cr) {
+      if (!is_cr) {
         
+        chf[[k]] <- chfx0[[k]]
+        chf[[k]][val_indx1[[k]], ] <- chfx1[[k]][val_indx1[[k]], ]
+        
+        add_chf <- list(
+          chf_val = chf[[k]][val_idx, ],
+          chfx0_val = chfx0[[k]][val_idx, ],
+          chfx1_val = chfx1[[k]][val_idx, ],
+          chf_tst = chf[[k]][-val_idx, ],
+          chfx0_tst = chfx0[[k]][-val_idx, ],
+          chfx1_tst = chfx1[[k]][-val_idx, ]
+        )
+        
+      } else {
+        
+        chf[[k]] <- chfx0[[k]]
+        chf[[k]][val_indx1[[k]], ,] <- chfx1[[k]][val_indx1[[k]], ,]
         cif[[k]] <- cifx0[[k]]
         cif[[k]][val_indx1[[k]], ,] <- cifx1[[k]][val_indx1[[k]], ,]
         
-        add_cr <- list(
+        add_chf <- list(
+          chf_val = chf[[k]][val_idx, ,],
+          chfx0_val = chfx0[[k]][val_idx, ,],
+          chfx1_val = chfx1[[k]][val_idx, ,],
+          chf_tst = chf[[k]][-val_idx, ,],
+          chfx0_tst = chfx0[[k]][-val_idx, ,],
+          chfx1_tst = chfx1[[k]][-val_idx, ,],
           cif_val = cif[[k]][val_idx, ,],
           cifx0_val = cifx0[[k]][val_idx, ,],
           cifx1_val = cifx1[[k]][val_idx, ,],
@@ -202,9 +217,9 @@ chf_rfs_cf <- function(data, X, time_var, event_var, rhs, time_interest,
           cifx0_tst = cifx0[[k]][-val_idx, ,],
           cifx1_tst = cifx1[[k]][-val_idx, ,]
         )
-        
-        ret[[k]] <- c(ret[[k]], add_cr)
       }
+      
+      ret[[k]] <- c(ret[[k]], add_chf)
     }
   } else { # without folds, returning out-of-fold predictions of everything
     
