@@ -8,7 +8,7 @@ DGM_SEED <- 2026
 pz <- 5
 q <- 3
 k <- 4
-n <- 5000
+n <- 10^4
 nseed <- 96
 n_truth <- 1e6
 effects <- c("tv", "ctfde", "ctfie", "ctfse")
@@ -52,8 +52,8 @@ run_one <- function(seed) {
   data.table::setDTthreads(1)
   g <- draw_dgp(n, 10000 + seed)
   set.seed(20000 + seed)
-  dr <- one_step_debias_surv(as.data.table(g$data), X, Z, W, time_var, event_var, 
-                             time_interest = fit_grid)$measures
+  dr <- one_step_debias_surv(as.data.table(g$data), X, Z, W, time_var, event_var,
+                             time_interest = fit_grid, dgm = g)$measures
   dr <- dr[effect %in% effects & time_interest %in% eval_grid]
   dr[, `:=`(method = "DR", seed = seed, sample_size = n, scale = "surv", event = 1)]
   dr
@@ -81,9 +81,9 @@ print(summary)
 
 saveRDS(list(estimates = est_full, truth = gt, summary = summary, agg = agg, 
              par = par),
-        file.path(root, "results", "dml-coverage.rds"))
+        file.path(root, "results", "nic-dml-coverage-10k.rds"))
 
-s   <- readRDS(file.path(root, "results", "dml-coverage.rds"))$summary
+s   <- readRDS(file.path(root, "results", "nic-dml-coverage-10k.rds"))$summary
 tab <- dcast(s, effect ~ time_interest, value.var = "coverage")
 for (j in names(tab)[-1]) tab[[j]] <- sprintf("%.0f\\%%", 100 * tab[[j]])
 

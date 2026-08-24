@@ -94,13 +94,6 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
     tgrid <- time_interest
     s_xzw_mod <- vector("list", K)
   }
-
-  # s_xz_mod <- chf_rfs_cf(
-  #   data = data[, c(X, Z, time_var, event_var), with = FALSE],
-  #   X = X, time_var = time_var, event_var = event_var,
-  #   rhs = paste(c(X, Z), collapse = "+"), time_interest = tgrid,
-  #   balance_groups = FALSE, split_forest = FALSE, folds = fld_lst, ...
-  # )
   
   # censoring G(t): flip event to "censoring event" (1 if censored)
   dG <- copy(data)
@@ -120,64 +113,64 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
   }
   
   # ---- nuisance modification: marginal KM corruption or oracle truth ----
-  if (TRUE) {
-    
+  # dgm is only ever available for synthetic experiments (known DGP); on
+  # real data (no dgm) neither modify_S/modify_G nor the A0/A1/A2 oracle
+  # decomposition are meaningful, so this whole block is skipped there.
+  ora_px_z <- ora_px_zw <- ora_nu <- NULL
+  if ((!is.null(modify_S) || !is.null(modify_G)) && is.null(dgm)) {
+    stop("modify_S/modify_G require `dgm` (the known data-generating ",
+         "mechanism) to compute oracle/corrupt nuisances; got dgm = NULL.")
+  }
+  if (!is.null(dgm)) {
+
     # first computing the corruptions / ground truth
     if (!is.null(modify_S)) assert_that(modify_S %in% c("corrupt", "oracle"))
     if (!is.null(modify_G)) assert_that(modify_G %in% c("corrupt", "oracle"))
-    
+
     km_eval <- function(times, events, tgrid) {
       sf <- survival::survfit(survival::Surv(times, events) ~ 1)
       fn <- stepfun(sf$time, c(1, sf$surv), right = FALSE)
       pmax(fn(tgrid), 1e-6)
     }
-    
+
     # oracle S(t | X,Z,W) / CIF_k(t | X,Z,W), and their counterfactuals
     # under X:=x (unit's own factual Z,W throughout, only X intervened)
     if (is_cr) {
-
+      
       x1_ind <- data[[X]] == 1
       cifx0 <- array(0, dim = c(n, length(tgrid), nlvls))
       cifx1 <- array(0, dim = c(n, length(tgrid), nlvls))
-
+      
       for (j in seq_len(nlvls)) {
         c_true <- CIF_conditional_exact(dgm, tgrid, event = j)
         cifx0[, , j] <- c_true$cifx0
         cifx1[, , j] <- c_true$cifx1
       }
-
+      
       cif <- cifx0
       cif[x1_ind, , ] <- cifx1[x1_ind, , ]
-
+      
       srvx0 <- 1 - apply(cifx0, c(1, 2), sum)
       srvx1 <- 1 - apply(cifx1, c(1, 2), sum)
       srv <- srvx0
       srv[x1_ind, ] <- srvx1[x1_ind, ]
       
-      # browser()
-      # attenuation check (Browse, one fold, t=50, j=2) using the exact oracle:
-      # d_hat <- s_xzw_mod[[1]]$cifx1_tst[,50,2] - s_xzw_mod[[1]]$cifx0_tst[,50,2]
-      # d_or  <- cifx1[fld_lst[[1]]$tst,50,2]    - cifx0[fld_lst[[1]]$tst,50,2]
-      # c(atten = mean(d_hat)/mean(d_or), cor = cor(d_hat, d_or))
-      # s_xzw_mod[[1]]$cif_tst[, , 2]
-      # cif[fld_lst[[1]]$tst, , 2]
-      # colMeans(s_xzw_mod[[1]]$cif_tst[, , 2] - cif[fld_lst[[1]]$tst, , 2])
-      # s <- s_xzw_mod[[1]]$cif_tst[, , 2]
-      # o <- cif[fld_lst[[1]]$tst, , 2]
-      # plot(s_xzw_mod[[1]]$cif_tst[, 50, 2], cif[fld_lst[[1]]$tst, 50, 2])
-      # quantile(abs(s_xzw_mod[[1]]$cif_tst[, 50, 2] - cif[fld_lst[[1]]$tst, 50, 2]))
+      # closed-form oracle nuisances for the A0/A1/A2 decomposition
+      ora_px_z  <- oracle_px_z(dgm)
+      ora_px_zw <- oracle_px_zw(dgm, ora_px_z)
+      ora_nu    <- oracle_nuisances_cr(dgm, tgrid)$ey_nest
 
     } else {
-
+      
       x1_ind <- data[[X]] == 1
       s_true <- S_T_potential_curves_from_gen(dgm, tgrid)
-
+      
       srvx0 <- s_true[["S_x0_wx0"]]
       srvx0[x1_ind, ] <- s_true[["S_x0_wx1"]][x1_ind, ]
-
+      
       srvx1 <- s_true[["S_x1_wx0"]]
       srvx1[x1_ind, ] <- s_true[["S_x1_wx1"]][x1_ind, ]
-
+      
       srv <- srvx0
       srv[x1_ind, ] <- srvx1[x1_ind, ]
     }
@@ -208,16 +201,16 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
         s_xzw_mod[[i]]$srvx1_val <- Mv
         
       } else if (identical(modify_S, "oracle") && is_cr) {
-
+        
         s_xzw_mod[[i]]$srv_tst <- srv[tst, ]
         s_xzw_mod[[i]]$cif_tst <- cif[tst, , ]
         s_xzw_mod[[i]]$cifx0_tst <- cifx0[tst, , ]
         s_xzw_mod[[i]]$cifx1_tst <- cifx1[tst, , ]
         s_xzw_mod[[i]]$cifx0_val <- cifx0[val, , ]
         s_xzw_mod[[i]]$cifx1_val <- cifx1[val, , ]
-
+        
       } else if (identical(modify_S, "oracle")) {
-
+        
         s_xzw_mod[[i]]$srv_tst <- srv[tst, ]
         s_xzw_mod[[i]]$srvx0_tst <- srvx0[tst, ]
         s_xzw_mod[[i]]$srvx1_tst <- srvx1[tst, ]
@@ -372,10 +365,8 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
         
         for (xy in c(0, 1)) {
           
-          y_xzw[[xy + 1]][[t]][tst] <- 
+          y_xzw[[xy + 1]][[t]][tst] <-
             s_xzw_mod[[i]][[paste0("srvx", xy, "_tst")]][, t]
-          # y_xz[[xy + 1]][[t]][tst] <- 
-          #   s_xz_mod[[i]][[paste0("srvx", xy, "_tst")]][, t]
         }
       } else {
         
@@ -441,9 +432,8 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
             
             y_xzw[[xy + 1]][[t]][[j]][tst] <-
               s_xzw_mod[[i]][[paste0("cifx", xy, "_tst")]][, t, j]
-            
-            if (!identical(modify_S, "oracle") && is_cr) {
-              
+
+            if (!is.null(dgm)) {
               cif_ora <- if (xy == 1) cifx1[tst, , ] else cifx0[tst, , ]
               y_xzw_ora[[xy + 1]][[t]][[j]][tst] <- cif_ora[, t, j]
             }
@@ -454,7 +444,7 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
     
     # develop models on dev
     if (length(Z) > 0) {
-
+      
       mod_x_z <- cv_xgb_surv(data[dev, Z, with=F], data[dev, X, with=F], ...)
     }
     
@@ -508,10 +498,12 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
         for (j in seq_len(nlvls)) {
           
           
-          #' TODO: remove this temporary oracle
-          # oracle ey_nest
-          if (!identical(modify_S, "oracle")) {
-            
+          # oracle ey_nest (A0/A1/A2 decomposition): skipped when modify_S is
+          # already "oracle", since ey_nest itself is then already a fit on
+          # the oracle target and a separate ey_nest_ora would just be a
+          # redundant second fit of the identical (data, target) pair
+          if (!is.null(dgm) && !identical(modify_S, "oracle")) {
+
             cif_ora <- if (xy == 1) cifx1[val, ,] else cifx0[val, ,]
             y_tilde_ora <- cif_ora[, t, j]
             mod_nested_ora <- cv_xgb_surv(data[val, c(X, Z), with=F], y_tilde_ora, ...)
@@ -531,7 +523,7 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
     }
     
   }
-
+  
   list(
     ria = ri_adj,
     y_xzw = y_xzw,
@@ -540,6 +532,9 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
     px_zw = px_zw,
     ey_nest = ey_nest,
     ey_nest_ora = ey_nest_ora,
+    ora_px_z = ora_px_z,
+    ora_px_zw = ora_px_zw,
+    ora_nu = ora_nu,
     tgrid = tgrid,
     is_cr = is_cr,
     nlvls = nlvls,
@@ -567,18 +562,18 @@ pso_diff_surv <- function(cfit, data, X, Z, W, time_var, event_var, ...) {
   x <- data[[X]]
   pso <- list(list(list(list(), list()), list(list(), list())),
               list(list(list(), list()), list(list(), list())))
+  pso_ora <- pso
   
   for (xz in c(0, 1)) for (xw in c(0, 1)) for (xy in c(0, 1)) {
     
     pso[[xz+1]][[xw+1]][[xy+1]] <- cfit$tres
+    pso_ora[[xz+1]][[xw+1]][[xy+1]] <- cfit$tres
   }
   
   for (t in seq_along(tgrid)) {
     
     for (xz in c(0, 1)) for (xw in c(0, 1)) for (xy in c(0, 1)) {
-      
-      # if (xy == 1 & xw == 0 & t == 20) browser()
-      
+
       if (!is_cr) {
         
         pso[[xz+1]][[xw+1]][[xy+1]][[t]] <-
@@ -598,9 +593,7 @@ pso_diff_surv <- function(cfit, data, X, Z, W, time_var, event_var, ...) {
         
         
         for (j in seq_len(nlvls)) {
-          
-          # if (t == 50 & j == 2) browser()
-          
+
           pso[[xz+1]][[xw+1]][[xy+1]][[t]][[j]] <-
             
             # Term T1
@@ -614,11 +607,29 @@ pso_diff_surv <- function(cfit, data, X, Z, W, time_var, event_var, ...) {
             
             # Term T3
             (x == xz) / mean(x == xz) * ey_nest[[xw+1]][[xy+1]][[t]][[j]]
+          
+          # oracle pseudo-outcome phi(V; P) + psi * 1(x = xz) / P_hat(xz):
+          # same ria (exact under modify_G = "oracle", martingale off),
+          # oracle CIF, oracle propensities, closed-form oracle nu
+          if (!is.null(cfit$ora_px_z)) {
+            
+            oz <- cfit$ora_px_z; ozw <- cfit$ora_px_zw
+            onu <- cfit$ora_nu[[xw+1]][[xy+1]][[t]][[j]]
+            
+            pso_ora[[xz+1]][[xw+1]][[xy+1]][[t]][[j]] <-
+              (x == xy) * (ria[[t]][[j]] - y_xzw_ora[[xy+1]][[t]][[j]]) *
+              ozw[[xw+1]] / ozw[[xy+1]] * oz[[xz+1]] / oz[[xw+1]] *
+              1 / mean(x == xz) +
+              (x == xw) / mean(x == xz) * oz[[xz+1]] / oz[[xw+1]] *
+              (y_xzw_ora[[xy+1]][[t]][[j]] - onu) +
+              (x == xz) / mean(x == xz) * onu
+          }
         }
       }
     }
   }
   
+  attr(pso, "pso_ora") <- pso_ora
   pso
 }
 
@@ -693,7 +704,7 @@ one_step_debias_surv <- function(data, X, Z, W, time_var, event_var,
   is_sens <- if (!is.null(copula)) TRUE else FALSE
   res_sens <- NULL
   if (is_sens) {
-
+    
     res_sens <- c()
     elm <- list(
       list(mu = rep(NA, length(cfit$tgrid)), sd = rep(NA, length(cfit$tgrid))),
@@ -703,8 +714,8 @@ one_step_debias_surv <- function(data, X, Z, W, time_var, event_var,
                 list(list(elm, elm), list(elm, elm))) 
     
     elm2 <- replicate(length(tau_grid), list(mean = rep(NA, length(cfit$tgrid)),
-                              lwr = rep(NA, length(cfit$tgrid)),
-                              upr = rep(NA, length(cfit$tgrid))), 
+                                             lwr = rep(NA, length(cfit$tgrid)),
+                                             upr = rep(NA, length(cfit$tgrid))), 
                       simplify = FALSE)
     shat <- list(list(list(elm2, elm2), list(elm2, elm2)), 
                  list(list(elm2, elm2), list(elm2, elm2))) 
@@ -761,13 +772,13 @@ one_step_debias_surv <- function(data, X, Z, W, time_var, event_var,
       for (tau_id in seq_along(tau_grid)) {
         
         eff_mean <- shat[[xz1+1]][[xw1+1]][[xy1+1]][[tau_id]][["mean"]] -
-                    shat[[xz2+1]][[xw2+1]][[xy2+1]][[tau_id]][["mean"]]
+          shat[[xz2+1]][[xw2+1]][[xy2+1]][[tau_id]][["mean"]]
         
         eff_lwr <- shat[[xz1+1]][[xw1+1]][[xy1+1]][[tau_id]][["lwr"]] -
-                   shat[[xz2+1]][[xw2+1]][[xy2+1]][[tau_id]][["upr"]]
+          shat[[xz2+1]][[xw2+1]][[xy2+1]][[tau_id]][["upr"]]
         
         eff_upr <- shat[[xz1+1]][[xw1+1]][[xy1+1]][[tau_id]][["upr"]] -
-                   shat[[xz2+1]][[xw2+1]][[xy2+1]][[tau_id]][["lwr"]]
+          shat[[xz2+1]][[xw2+1]][[xy2+1]][[tau_id]][["lwr"]]
         
         res_sens <- rbind(
           res_sens,
@@ -778,9 +789,9 @@ one_step_debias_surv <- function(data, X, Z, W, time_var, event_var,
       }
     }
   }
-
+  
   { # classical point estimates (always computed, cheap relative to the fit)
-
+    
     res <- c()
     for (i in seq_along(eff)) {
       
@@ -830,37 +841,70 @@ one_step_debias_surv <- function(data, X, Z, W, time_var, event_var,
       }
     }
   }
-
+  
   { # raw potential-outcome cells psi(xz,xw,xy), pre-differencing -- just a
     # summary of pso (already computed above), useful for isolating which
     # nested counterfactual a bias comes from without re-deriving effects
     res_po <- c()
     for (xz in c(0, 1)) for (xw in c(0, 1)) for (xy in c(0, 1)) {
-
+      
       for (t in seq_along(cfit$tgrid)) {
-
+        
         if (!cfit$is_cr) {
-
+          
           pseudo_out <- pso[[xz+1]][[xw+1]][[xy+1]][[t]]
           psi_osd <- mean(pseudo_out, na.rm = TRUE)
           dev <- sqrt(var(pseudo_out, na.rm = TRUE) / sum(!is.na(pseudo_out)))
-
+          
           res_po <- rbind(
             res_po,
             data.frame(xz = xz, xw = xw, xy = xy, value = psi_osd, sd = dev,
                        time_interest = cfit$tgrid[t])
           )
         } else {
-
+          
           for (j in seq_len(cfit$nlvls)) {
-
+            
             pseudo_out <- pso[[xz+1]][[xw+1]][[xy+1]][[t]][[j]]
             psi_osd <- mean(pseudo_out, na.rm = TRUE)
             dev <- sqrt(var(pseudo_out, na.rm = TRUE) / sum(!is.na(pseudo_out)))
-
+            
+            # ---- A0/A1/A2 decomposition columns ----
+            # A0 = value_ora - truth (merge with ground_truth_cr_cells downstream)
+            # A2 ~= e2_t2 + e2_t3 (empirical E2, censoring term = 0 under oracle G)
+            # A1 = (value - value_ora) - A2
+            value_ora <- e2_t2 <- e2_t3 <- a1 <- NA_real_
+            pso_ora <- attr(pso, "pso_ora")
+            if (!is.null(cfit$ora_px_z)) {
+              
+              xvec <- data[[X]]
+              value_ora <- mean(pso_ora[[xz+1]][[xw+1]][[xy+1]][[t]][[j]],
+                                na.rm = TRUE)
+              
+              oz <- cfit$ora_px_z; ozw <- cfit$ora_px_zw
+              err_y <- cfit$y_xzw_ora[[xy+1]][[t]][[j]] -
+                cfit$y_xzw[[xy+1]][[t]][[j]]
+              err_nu <- cfit$ora_nu[[xw+1]][[xy+1]][[t]][[j]] -
+                cfit$ey_nest[[xw+1]][[xy+1]][[t]][[j]]
+              
+              # r1 = lam_hat / lam on Z-scale; r2 = lam / lam_hat on ZW-scale
+              r1 <- (cfit$px_z[[xz+1]] / cfit$px_z[[xw+1]]) /
+                (oz[[xz+1]] / oz[[xw+1]])
+              r2 <- (ozw[[xy+1]] / ozw[[xw+1]]) /
+                (cfit$px_zw[[xy+1]] / cfit$px_zw[[xw+1]])
+              wzw <- (xvec == xw) * oz[[xz+1]] / oz[[xw+1]] / mean(xvec == xz)
+              
+              e2_t2 <- mean(wzw * r1 * (r2 - 1) * err_y, na.rm = TRUE)
+              e2_t3 <- mean((xvec == xz) / mean(xvec == xz) * (r1 - 1) * err_nu,
+                            na.rm = TRUE)
+              a1 <- (psi_osd - value_ora) - e2_t2 - e2_t3
+            }
+            
             res_po <- rbind(
               res_po,
               data.frame(xz = xz, xw = xw, xy = xy, value = psi_osd, sd = dev,
+                         value_ora = value_ora, a1 = a1,
+                         e2_t2 = e2_t2, e2_t3 = e2_t3,
                          time_interest = cfit$tgrid[t], event = j)
             )
           }
@@ -868,7 +912,7 @@ one_step_debias_surv <- function(data, X, Z, W, time_var, event_var,
       }
     }
   }
-
+  
   structure(
     list(
       measures = as.data.table(res),
@@ -889,7 +933,7 @@ autoplot.fairsurv_osd <- function(object, ...) {
   
   plt_dat <- copy(if (object$is_sens) object$measures_sens else object$measures)
   plt_dat[, effect := factor(effect, levels = c("tv", "ctfde", "ctfie", "ctfse"),
-          labels = c("Total Variation", "Direct", "Indirect", "Spurious"))]
+                             labels = c("Total Variation", "Direct", "Indirect", "Spurious"))]
   if (object$is_sens) { #
     
     # tau as linetype (assumes up to 4 tau values)
@@ -927,7 +971,7 @@ autoplot.fairsurv_osd <- function(object, ...) {
   } else if (object$is_cr) { # competing risks
     
     p <- ggplot(plt_dat, aes(x = time_interest, y = value, color = effect, 
-                            fill = effect)) +
+                             fill = effect)) +
       geom_line() + theme_bw() +
       geom_ribbon(aes(ymin = value - width * sd, ymax = value + width * sd),
                   alpha = 0.4, linewidth = 0) +
