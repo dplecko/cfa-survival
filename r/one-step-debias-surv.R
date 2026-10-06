@@ -49,7 +49,19 @@ pred_xgb_surv <- function(xgb, df_test, intervention = NULL, X = "X") {
 }
 
 cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest, 
-                           martingale_debias, modify_S, modify_G, dgm, ...) {
+                           martingale_debias, modify_S, modify_G, dgm, 
+                           cache_file = NULL, ...) {
+  
+  if (!is.null(cache_file) && file.exists(cache_file)) {
+    message("Loading cached cross-fit from ", cache_file)
+    cfit <- readRDS(cache_file)
+    if (!is.null(time_interest))
+      assert_that(isTRUE(all.equal(cfit$tgrid, time_interest)),
+                  msg = "cached tgrid differs from time_interest")
+    assert_that(length(cfit$px_z[[1]]) == nrow(data),
+                msg = "cached cross-fit has a different number of rows than data")
+    return(cfit)
+  }
   
   if (length(Z) == 0 & length(W) == 0) {
     
@@ -268,11 +280,14 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
       stopifnot(is.numeric(m), is.numeric(ggrid), is.matrix(G))
       stopifnot(length(ggrid) == ncol(G), length(m) == nrow(G))
       
+      # anchor G(0) = 1 so that M <= ggrid[1] interpolates instead of giving NA
+      if (ggrid[1] > 0) { ggrid <- c(0, ggrid); G <- cbind(1, G) }
+      
       # clamp to grid range
       m0 <- pmax(ggrid[1], pmin(m, ggrid[length(ggrid)]))
       
       # find interval index i s.t. ggrid[i] <= m0 <= ggrid[i+1]
-      i <- .bincode(m0, ggrid)              
+      i <- .bincode(m0, ggrid, include.lowest = TRUE)
       i <- pmin(i, length(ggrid) - 1L)
       
       t0 <- ggrid[i]
@@ -524,22 +539,21 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
     
   }
   
-  list(
-    ria = ri_adj,
-    y_xzw = y_xzw,
-    y_xzw_ora = y_xzw_ora,
-    px_z = px_z,
-    px_zw = px_zw,
-    ey_nest = ey_nest,
-    ey_nest_ora = ey_nest_ora,
-    ora_px_z = ora_px_z,
-    ora_px_zw = ora_px_zw,
-    ora_nu = ora_nu,
-    tgrid = tgrid,
-    is_cr = is_cr,
-    nlvls = nlvls,
-    tres = tres
+  out <- list(
+    ria = ri_adj, y_xzw = y_xzw, y_xzw_ora = y_xzw_ora,
+    px_z = px_z, px_zw = px_zw, ey_nest = ey_nest, ey_nest_ora = ey_nest_ora,
+    ora_px_z = ora_px_z, ora_px_zw = ora_px_zw, ora_nu = ora_nu,
+    tgrid = tgrid, is_cr = is_cr, nlvls = nlvls, tres = tres,
+    fld_lst = fld_lst,
+    # validation-fold conditional CIFs, needed by Route I (slim: no forest objects)
+    s_xzw_mod = lapply(s_xzw_mod, function(s)
+      if (is.null(s)) NULL else s[intersect(names(s), c("cifx0_val", "cifx1_val"))])
   )
+  if (!is.null(cache_file)) {
+    dir.create(dirname(cache_file), showWarnings = FALSE, recursive = TRUE)
+    saveRDS(out, cache_file)
+  }
+  out
 }
 
 pso_diff_surv <- function(cfit, data, X, Z, W, time_var, event_var, ...) {
@@ -633,6 +647,120 @@ pso_diff_surv <- function(cfit, data, X, Z, W, time_var, event_var, ...) {
   pso
 }
 
+recentre_pso <- function(pso, x, tgrid, is_cr, nlvls) {
+  # P(xz) taken over the same non-NA rows as psi, so P_n[1(x = xz) / P(xz)] = 1
+  # exactly and the mean is preserved also with trimmed / NA rows
+  rc <- function(p, xz) {
+    ok <- !is.na(p)
+    psi <- mean(p[ok])
+    p - (x == xz) / mean(x[ok] == xz) * psi + psi
+  }
+  for (xz in 0:1) for (xw in 0:1) for (xy in 0:1) for (t in seq_along(tgrid)) {
+    if (!is_cr) {
+      pso[[xz+1]][[xw+1]][[xy+1]][[t]] <- rc(pso[[xz+1]][[xw+1]][[xy+1]][[t]], xz)
+    } else for (j in seq_len(nlvls)) {
+      pso[[xz+1]][[xw+1]][[xy+1]][[t]][[j]] <-
+        rc(pso[[xz+1]][[xw+1]][[xy+1]][[t]][[j]], xz)
+    }
+  }
+  pso
+}
+
+route2_cge <- function(pso, eff, tgrid, gen, jT, jC, tau) {
+  m <- length(tgrid)
+  cells <- list()
+  for (xz in 0:1) for (xw in 0:1) for (xy in 0:1) {
+    cell <- pso[[xz+1]][[xw+1]][[xy+1]]
+    PT <- sapply(seq_len(m), function(t) cell[[t]][[jT]])   # n x m
+    PC <- sapply(seq_len(m), function(t) cell[[t]][[jC]])   # n x m
+    thT <- colMeans(PT, na.rm = TRUE)
+    thC <- colMeans(PC, na.rm = TRUE)
+    # NOTE: pso used uncentred, consistent with the existing variance convention
+    cg <- cge_lin(matrix(thT, 1), matrix(thC, 1), PT, PC, gen)
+    cells[[paste0(xz, xw, xy)]] <- list(S = cg$S[1, ], lwr_id = cg$lwr[1, ],
+                                        upr_id = cg$upr[1, ], dS = cg$dS)
+  }
+  res <- c()
+  for (e in eff) {
+    stopifnot(identical(e$sgn, c(1, -1)))
+    k1 <- paste(e$spc[[1]], collapse = "")   # spc = c(xz, xw, xy)
+    k2 <- paste(e$spc[[2]], collapse = "")
+    val <- cells[[k1]]$S - cells[[k2]]$S
+    po  <- cells[[k1]]$dS - cells[[k2]]$dS
+    sd  <- sqrt(apply(po, 2, var, na.rm = TRUE) / colSums(!is.na(po)))
+    res <- rbind(res, data.frame(effect = e$nm, value = val, sd = sd,
+                                 lwr = val - 1.96 * sd, upr = val + 1.96 * sd,
+                                 tau = tau, time_interest = tgrid))
+  }
+  band <- rbindlist(lapply(names(cells), function(k) data.table(
+    cell = k, S = cells[[k]]$S, lwr_id = cells[[k]]$lwr_id,
+    upr_id = cells[[k]]$upr_id, tau = tau, time_interest = tgrid)))
+  list(res = res, band = band)
+}
+
+route1_cge <- function(cfit, data, X, Z, W, eff, gen, jT, jC, extrm_idx, tau, ...) {
+  tgrid <- cfit$tgrid; m <- length(tgrid); n <- nrow(data); x <- data[[X]]
+  getmat <- function(lst_t, j) sapply(seq_len(m), function(t) lst_t[[t]][[j]])  # n x m
+  FTx <- lapply(1:2, function(a) getmat(cfit$y_xzw[[a]], jT))  # [[xy+1]]: CIF_T(t | x_y, Z_i, W_i)
+  FCx <- lapply(1:2, function(a) getmat(cfit$y_xzw[[a]], jC))
+  HT  <- getmat(cfit$ria, jT)                                  # pseudo-outcomes H^T(t)
+  HC  <- getmat(cfit$ria, jC)
+  # factual conditional CIFs F(X_i, Z_i, W_i)
+  FT_f <- FTx[[1]]; FT_f[x == 1, ] <- FTx[[2]][x == 1, ]
+  FC_f <- FCx[[1]]; FC_f[x == 1, ] <- FCx[[2]][x == 1, ]
+  cg_f <- cge_lin(FT_f, FC_f, HT - FT_f, HC - FC_f, gen)
+  ria_new <- cg_f$S + cg_f$dS                                   # Phi(factual) + lin
+  Phi <- lapply(1:2, function(a) cge_lin(FTx[[a]], FCx[[a]], gen = gen)$S)  # [[xy+1]]
+
+  # nested regressions nu_{xy,xw}(Z) = E[Phi(x_y) | X = x_w, Z], refit on Phi
+  ey_new <- lapply(1:2, function(a) lapply(1:2, function(b) matrix(NA_real_, n, m)))
+  for (i in seq_along(cfit$fld_lst)) {
+    val <- cfit$fld_lst[[i]]$val; tst <- cfit$fld_lst[[i]]$tst
+    for (xy in 0:1) {
+      A <- cfit$s_xzw_mod[[i]][[paste0("cifx", xy, "_val")]]   # n_val x m x nlvls
+      Phi_val <- cge_lin(matrix(A[, , jT], ncol = m), matrix(A[, , jC], ncol = m), gen = gen)$S
+      for (t in seq_len(m)) {
+        mod <- cv_xgb_surv(data[val, c(X, Z), with = FALSE], Phi_val[, t], ...)
+        for (xw in 0:1)
+          ey_new[[xw+1]][[xy+1]][tst, t] <-
+            pred_xgb_surv(mod, data[tst, c(X, Z), with = FALSE], intervention = xw, X = X)
+      }
+    }
+  }
+
+  tolist <- function(M) lapply(seq_len(m), function(t) M[, t])
+  cfit_I <- list(
+    ria = tolist(ria_new),
+    y_xzw = lapply(1:2, function(a) tolist(Phi[[a]])),
+    y_xzw_ora = NULL,
+    px_z = cfit$px_z, px_zw = cfit$px_zw,
+    ey_nest = lapply(1:2, function(a) lapply(1:2, function(b) tolist(ey_new[[a]][[b]]))),
+    ey_nest_ora = NULL, ora_px_z = NULL, ora_px_zw = NULL, ora_nu = NULL,
+    tgrid = tgrid, is_cr = FALSE, nlvls = 1,
+    tres = replicate(m, rep(NA, n), simplify = FALSE)
+  )
+  pso_I <- pso_diff_surv(cfit_I, data, X, Z, W, NULL, NULL)
+  for (xz in 0:1) for (xw in 0:1) for (xy in 0:1) for (t in seq_len(m))
+    pso_I[[xz+1]][[xw+1]][[xy+1]][[t]][extrm_idx] <- NA
+  pso_I <- recentre_pso(pso_I, x, tgrid, FALSE, 1)
+
+  res <- c()
+  for (e in eff) for (t in seq_len(m)) {
+    po <- 0
+    for (s in seq_along(e$sgn)) {
+      sp <- e$spc[[s]]
+      po <- po + e$sgn[s] * pso_I[[sp[1]+1]][[sp[2]+1]][[sp[3]+1]][[t]]
+    }
+    po[extrm_idx] <- NA
+    val <- mean(po, na.rm = TRUE)
+    sd  <- sqrt(var(po, na.rm = TRUE) / sum(!is.na(po)))
+    res <- rbind(res, data.frame(effect = e$nm, value = val, sd = sd,
+                                 lwr = val - 1.96 * sd, upr = val + 1.96 * sd,
+                                 tau = tau, time_interest = tgrid[t]))
+  }
+  res
+}
+
 measure_spec <- function() {
   
   list(
@@ -664,10 +792,13 @@ one_step_debias_surv <- function(data, X, Z, W, time_var, event_var,
                                  copula = NULL, tau_grid = 0, 
                                  martingale_debias = TRUE, 
                                  modify_S = NULL, modify_G = NULL, 
-                                 dgm = NULL, ...) {
+                                 dgm = NULL, cache_file = NULL, 
+                                 route = "envelope", target_cause = 1L, ...) {
   
+  assert_that(all(route %in% c("envelope", "II", "I")))
   cfit <- cross_fit_surv(data, X, Z, W, time_var, event_var, time_interest, 
-                         martingale_debias, modify_S, modify_G, dgm, ...)
+                         martingale_debias, modify_S, modify_G, dgm, 
+                         cache_file = cache_file, ...)
   pso <- pso_diff_surv(cfit, data, X, Z, W, time_var, event_var, ...)
   
   # get extreme propensity weights
@@ -698,12 +829,16 @@ one_step_debias_surv <- function(data, X, Z, W, time_var, event_var,
           pso[[xz+1]][[xw+1]][[xy+1]][[t]][[j]][extrm_idx] <- NA
   }
   
+  # re-centre each cell's pseudo-outcome: subtracts 1(x = xz) / P(xz) * psi and
+  # adds psi back, so the mean (point estimate) is unchanged and only var() is
+  pso <- recentre_pso(pso, data[[X]], cfit$tgrid, cfit$is_cr, cfit$nlvls)
+  
   # get specification of measures to be reported
   eff <- measure_spec()
   
   is_sens <- if (!is.null(copula)) TRUE else FALSE
-  res_sens <- NULL
-  if (is_sens) {
+  res_sens <- band_sens <- NULL
+  if (is_sens && "envelope" %in% route) {
     
     res_sens <- c()
     elm <- list(
@@ -786,6 +921,26 @@ one_step_debias_surv <- function(data, X, Z, W, time_var, event_var,
                      lwr = eff_lwr, upr = eff_upr, tau = tau_grid[tau_id],
                      time_interest = cfit$tgrid)
         )
+      }
+    }
+    res_sens$route <- "envelope"
+    res_sens$sd <- NA_real_
+  }
+  
+  if (is_sens && any(c("I", "II") %in% route)) {
+    
+    assert_that(cfit$is_cr, cfit$nlvls == 2)
+    jT <- target_cause; jC <- setdiff(1:2, jT)
+    for (tau in tau_grid) {
+      gen <- arch_gen(copula, tau)
+      if ("II" %in% route) {
+        r2 <- route2_cge(pso, eff, cfit$tgrid, gen, jT, jC, tau)
+        res_sens <- rbindlist(list(res_sens, cbind(r2$res, route = "II")), fill = TRUE)
+        band_sens <- rbindlist(list(band_sens, r2$band), fill = TRUE)
+      }
+      if ("I" %in% route) {
+        r1 <- route1_cge(cfit, data, X, Z, W, eff, gen, jT, jC, extrm_idx, tau, ...)
+        res_sens <- rbindlist(list(res_sens, cbind(r1, route = "I")), fill = TRUE)
       }
     }
   }
@@ -918,13 +1073,14 @@ one_step_debias_surv <- function(data, X, Z, W, time_var, event_var,
       measures = as.data.table(res),
       measures_sens = if (!is.null(res_sens)) as.data.table(res_sens) else NULL,
       measures_po = as.data.table(res_po),
+      band_sens = band_sens,
       is_cr = cfit$is_cr, is_sens = is_sens,
       time_interest = cfit$tgrid, copula = copula, tau_grid = tau_grid
     ), class = "fairsurv_osd"
   )
 }
 
-autoplot.fairsurv_osd <- function(object, ...) {
+autoplot.fairsurv_osd <- function(object, route = NULL, ...) {
   
   meas <- c("ctfde", "ctfie", "ctfse", "tv")
   
@@ -935,6 +1091,11 @@ autoplot.fairsurv_osd <- function(object, ...) {
   plt_dat[, effect := factor(effect, levels = c("tv", "ctfde", "ctfie", "ctfse"),
                              labels = c("Total Variation", "Direct", "Indirect", "Spurious"))]
   if (object$is_sens) { #
+    
+    if ("route" %in% names(plt_dat)) {
+      rt <- if (is.null(route)) plt_dat$route[1] else route
+      plt_dat <- plt_dat[plt_dat$route == rt]
+    }
     
     # tau as linetype (assumes up to 4 tau values)
     plt_dat[, tau_f := factor(tau, levels = sort(unique(tau)))]

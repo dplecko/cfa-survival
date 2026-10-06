@@ -57,7 +57,10 @@ tgrid <- c(1:10, 14, 28, 56, 90, 180)
 dr_fsurv <- one_step_debias_surv(
   dat_run, X, Z, W, time_var, event_var, time_interest = tgrid,
   copula = if (out == "readm") "frank" else NULL,
-  tau_grid = if (out == "readm") c(0.1, 0.5, 0.8)
+  tau_grid = if (out == "readm") c(0.1, 0.5, 0.8),
+  # local runs use a 5000-row subsample, so they get their own cache file
+  cache_file = f("cache/{out}_{zw_bnd}{if (local) '_local' else ''}.rds"),
+  route = if (out == "readm") c("envelope", "II", "I") else "envelope"
 )
 
 save(dr_fsurv, file = f("results/sensitivity/{out}_{zw_bnd}.RData"))
@@ -65,6 +68,17 @@ save(dr_fsurv, file = f("results/sensitivity/{out}_{zw_bnd}.RData"))
 autoplot(dr_fsurv)
 ggsave(file.path("results", paste0("dr-", out, "-", zw_bnd, ".png")), 
        width = 14, height = 4)
+
+# one plot per sensitivity route (envelope / Route II / Route I) for readm
+if (out == "readm") {
+  
+  for (rt in c("envelope", "II", "I")) {
+    
+    autoplot(dr_fsurv, route = rt)
+    ggsave(file.path("results", paste0("dr-", out, "-", zw_bnd, "-route", rt, 
+                                       ".png")), width = 14, height = 4)
+  }
+}
 
 # library(data.table)
 # 
