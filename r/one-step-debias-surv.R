@@ -55,6 +55,10 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
   if (!is.null(cache_file) && file.exists(cache_file)) {
     message("Loading cached cross-fit from ", cache_file)
     cfit <- readRDS(cache_file)
+    assert_that(identical(cfit$aug_version, AUG_VERSION),
+                msg = paste0("stale cache ", cache_file, ": built with augmentation ",
+                             "version ", format(cfit$aug_version), ", current is ",
+                             AUG_VERSION, "; delete it and refit"))
     if (!is.null(time_interest))
       assert_that(isTRUE(all.equal(cfit$tgrid, time_interest)),
                   msg = "cached tgrid differs from time_interest")
@@ -271,45 +275,8 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
   # x data
   x <- data[[X]]
   
-  # if CR, compute the G(M | X, Z, W)
-  if (is_cr) {
-    
-    gm_xzw <- rep(NA, n)
-    G_m <- function(m, G, ggrid) {
-      
-      stopifnot(is.numeric(m), is.numeric(ggrid), is.matrix(G))
-      stopifnot(length(ggrid) == ncol(G), length(m) == nrow(G))
-      
-      # anchor G(0) = 1 so that M <= ggrid[1] interpolates instead of giving NA
-      if (ggrid[1] > 0) { ggrid <- c(0, ggrid); G <- cbind(1, G) }
-      
-      # clamp to grid range
-      m0 <- pmax(ggrid[1], pmin(m, ggrid[length(ggrid)]))
-      
-      # find interval index i s.t. ggrid[i] <= m0 <= ggrid[i+1]
-      i <- .bincode(m0, ggrid, include.lowest = TRUE)
-      i <- pmin(i, length(ggrid) - 1L)
-      
-      t0 <- ggrid[i]
-      t1 <- ggrid[i + 1L]
-      
-      # row-wise gather of G at i and i+1
-      g0 <- G[cbind(seq_along(m0), i)]
-      g1 <- G[cbind(seq_along(m0), i + 1L)]
-      
-      # linear interpolation weight
-      w <- (m0 - t0) / (t1 - t0)
-      w[!is.finite(w)] <- 0
-      
-      (1 - w) * g0 + w * g1
-    }
-    
-    for (i in seq_len(K)) {
-      tst <- fld_lst[[i]][["tst"]]
-      gm_xzw[tst] <- G_m(data[[time_var]][tst], g_xzw_mod[[i]][["srv_tst"]], tgrid)
-    }
-  }
-  
+  clip_counts <- NULL
+
   # cross-fit
   for (i in seq_len(K)) {
     
@@ -318,65 +285,23 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
     dev <- fld_lst[[i]][["dev"]]
     val <- fld_lst[[i]][["val"]]
     
-    M_tst <- data[[time_var]][tst]
-    Mt <- pmax(1L, findInterval(M_tst, tgrid))
-    S_M <- s_xzw_mod[[i]][["srv_tst"]][cbind(seq_along(Mt), Mt)]
-    G_M <- g_xzw_mod[[i]][["srv_tst"]][cbind(seq_along(Mt), Mt)]
-    xi2_int <- 0
-    
-    zeta2_A <- rep(0, sum(tst))
-    zeta2_B <- matrix(0, nrow = sum(tst), ncol = nlvls)
-    
-    if (is_cr) {
-      
-      cif_tst <- s_xzw_mod[[i]][["cif_tst"]]
-      s_all_tst <- s_xzw_mod[[i]][["srv_tst"]]
-      g_tst <- g_xzw_mod[[i]][["srv_tst"]]
-      h_c_tst <- g_xzw_mod[[i]][["chf_tst"]]
-      
-      # Grid approximation to F_j(M-) and S_all(M-)
-      m_idx <- findInterval(M_tst, tgrid)
-      has_m_idx <- m_idx > 0
-      
-      s_m_minus <- rep(1, length(M_tst))
-      s_m_minus[has_m_idx] <-
-        s_all_tst[cbind(which(has_m_idx), m_idx[has_m_idx])]
-      
-      cif_m_minus <- matrix(
-        0,
-        nrow = length(M_tst),
-        ncol = nlvls
-      )
-      
-      for (j in seq_len(nlvls)) {
-        cif_m_minus[has_m_idx, j] <-
-          cif_tst[cbind(which(has_m_idx), m_idx[has_m_idx], j)]
-      }
-    }
+    # pseudo-outcomes (IPCW + censoring augmentation), piecewise-exponential
+    # interpolation of S, G, CIF between grid points (see r/aug-pwexp.R)
+    aug <- pw_augment(
+      S = s_xzw_mod[[i]][["srv_tst"]], G = g_xzw_mod[[i]][["srv_tst"]],
+      cif = if (is_cr) s_xzw_mod[[i]][["cif_tst"]] else NULL,
+      chf = g_xzw_mod[[i]][["chf_tst"]],
+      M = data[[time_var]][tst], delta = data[[event_var]][tst],
+      tgrid = tgrid, martingale_debias = martingale_debias
+    )
+    clip_counts <- if (is.null(clip_counts)) aug$clip else
+      Map(`+`, clip_counts, aug$clip)
     
     for (t in seq_along(tgrid)) {
       
       if (!is_cr) {
         
-        ri_adj[[t]][tst] <- 
-          (data[[time_var]][tst] > tgrid[t]) / g_xzw_mod[[i]][["srv_tst"]][, t]
-        
-        if (martingale_debias) {
-          
-          S_t <- s_xzw_mod[[i]][["srv_tst"]][, t]
-          G_t <- g_xzw_mod[[i]][["srv_tst"]][, t]
-          H_tst <- g_xzw_mod[[i]][["chf_tst"]]
-          dH <- H_tst[, t] - if (t == 1) 0 else H_tst[, t - 1]
-          
-          # Accumulate Term \xi_2 (Continuous penalty integral up to t)
-          xi2_int <- xi2_int + (M_tst >= tgrid[t]) * dH / (S_t * G_t)
-          
-          # Compute Term \xi_1 (Censoring event jump)
-          xi1 <- S_t * (M_tst <= tgrid[t] & data[[event_var]][tst] == 0) / (S_M * G_M)
-          
-          # Combine: IPCW + \xi_1(t) - \xi_2(t)
-          ri_adj[[t]][tst] <- ri_adj[[t]][tst] + xi1 - (S_t * xi2_int)
-        }
+        ri_adj[[t]][tst] <- aug$H[, t]
         
         for (xy in c(0, 1)) {
           
@@ -385,63 +310,9 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
         }
       } else {
         
-        if (martingale_debias) {
-          
-          G_t <- pmax(g_tst[, t], 1e-6)
-          dH <- h_c_tst[, t] -
-            if (t == 1) 0 else h_c_tst[, t - 1]
-          
-          S_left <- if (t == 1) {
-            rep(1, sum(tst))
-          } else {
-            s_all_tst[, t - 1]
-          }
-          S_left <- pmax(S_left, 1e-6)
-          
-          zeta_weight <-
-            (M_tst >= tgrid[t]) * dH / (G_t * S_left)
-          
-          zeta2_A <- zeta2_A + zeta_weight
-          
-          for (j in seq_len(nlvls)) {
-            
-            F_left <- if (t == 1) {
-              rep(0, sum(tst))
-            } else {
-              cif_tst[, t - 1, j]
-            }
-            
-            zeta2_B[, j] <-
-              zeta2_B[, j] + zeta_weight * F_left
-          }
-        }
-        
         for (j in seq_len(nlvls)) {
           
-          F_t <- cif_tst[, t, j]
-          
-          # IPCW event term
-          ri_adj[[t]][[j]][tst] <-
-            (M_tst <= tgrid[t] &
-               data[[event_var]][tst] == j) /
-            pmax(gm_xzw[tst], 1e-6)
-          
-          if (martingale_debias) {
-            
-            # Censoring-event jump term
-            zeta1 <-
-              (M_tst <= tgrid[t] &
-                 data[[event_var]][tst] == 0) /
-              pmax(gm_xzw[tst], 1e-6) *
-              (F_t - cif_m_minus[, j]) /
-              pmax(s_m_minus, 1e-6)
-            
-            # Continuous censoring augmentation
-            zeta2 <- F_t * zeta2_A - zeta2_B[, j]
-            
-            ri_adj[[t]][[j]][tst] <-
-              ri_adj[[t]][[j]][tst] + zeta1 - zeta2
-          }
+          ri_adj[[t]][[j]][tst] <- aug$H[, t, j]
           
           for (xy in c(0, 1)) {
             
@@ -544,7 +415,7 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
     px_z = px_z, px_zw = px_zw, ey_nest = ey_nest, ey_nest_ora = ey_nest_ora,
     ora_px_z = ora_px_z, ora_px_zw = ora_px_zw, ora_nu = ora_nu,
     tgrid = tgrid, is_cr = is_cr, nlvls = nlvls, tres = tres,
-    fld_lst = fld_lst,
+    fld_lst = fld_lst, aug_version = AUG_VERSION, clip_counts = clip_counts,
     # validation-fold conditional CIFs, needed by Route I (slim: no forest objects)
     s_xzw_mod = lapply(s_xzw_mod, function(s)
       if (is.null(s)) NULL else s[intersect(names(s), c("cifx0_val", "cifx1_val"))])
