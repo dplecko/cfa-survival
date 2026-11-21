@@ -546,11 +546,13 @@ route2_cge <- function(pso, eff, tgrid, gen, jT, jC, tau) {
     PC <- sapply(seq_len(m), function(t) cell[[t]][[jC]])   # n x m
     thT <- colMeans(PT, na.rm = TRUE)
     thC <- colMeans(PC, na.rm = TRUE)
-    # NOTE: pso used uncentred, consistent with the existing variance convention
     cg <- cge_lin(matrix(thT, 1), matrix(thC, 1), PT, PC, gen)
     cells[[paste0(xz, xw, xy)]] <- list(S = cg$S[1, ], lwr_id = cg$lwr[1, ],
-                                        upr_id = cg$upr[1, ], dS = cg$dS)
+                                        upr_id = cg$upr[1, ], dS = cg$dS,
+                                        dlwr = cg$dlwr, dupr = cg$dupr,
+                                        D_clamped = cg$D_clamped[1, ])
   }
+  se_of <- function(po) sqrt(apply(po, 2, var, na.rm = TRUE) / colSums(!is.na(po)))
   res <- c()
   for (e in eff) {
     stopifnot(identical(e$sgn, c(1, -1)))
@@ -559,13 +561,30 @@ route2_cge <- function(pso, eff, tgrid, gen, jT, jC, tau) {
     val <- cells[[k1]]$S - cells[[k2]]$S
     po  <- cells[[k1]]$dS - cells[[k2]]$dS
     sd  <- sqrt(apply(po, 2, var, na.rm = TRUE) / colSums(!is.na(po)))
+    # identified set for P_k1 - P_k2 and delta-method SEs of its endpoints
+    id_lo <- cells[[k1]]$lwr_id - cells[[k2]]$upr_id
+    id_hi <- cells[[k1]]$upr_id - cells[[k2]]$lwr_id
+    se_lo <- se_of(cells[[k1]]$dlwr - cells[[k2]]$dupr)
+    se_hi <- se_of(cells[[k1]]$dupr - cells[[k2]]$dlwr)
+    # Route II: lwr/upr = partial-ID CI; other routes: midpoint CI
     res <- rbind(res, data.frame(effect = e$nm, value = val, sd = sd,
-                                 lwr = val - 1.96 * sd, upr = val + 1.96 * sd,
+                                 lwr = id_lo - 1.96 * se_lo,
+                                 upr = id_hi + 1.96 * se_hi,
+                                 id_lo = id_lo, id_hi = id_hi,
+                                 se_lo = se_lo, se_hi = se_hi,
+                                 lwr_mid = val - 1.96 * sd,
+                                 upr_mid = val + 1.96 * sd,
                                  tau = tau, time_interest = tgrid))
   }
-  band <- rbindlist(lapply(names(cells), function(k) data.table(
-    cell = k, S = cells[[k]]$S, lwr_id = cells[[k]]$lwr_id,
-    upr_id = cells[[k]]$upr_id, tau = tau, time_interest = tgrid)))
+  band <- rbindlist(lapply(names(cells), function(k) {
+    se_l <- se_of(cells[[k]]$dlwr); se_u <- se_of(cells[[k]]$dupr)
+    data.table(
+      cell = k, S = cells[[k]]$S, lwr_id = cells[[k]]$lwr_id,
+      upr_id = cells[[k]]$upr_id, se_lwr_id = se_l, se_upr_id = se_u,
+      ci_lo = cells[[k]]$lwr_id - 1.96 * se_l,
+      ci_hi = cells[[k]]$upr_id + 1.96 * se_u,
+      D_clamped = cells[[k]]$D_clamped, tau = tau, time_interest = tgrid)
+  }))
   list(res = res, band = band)
 }
 

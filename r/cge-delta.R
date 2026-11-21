@@ -60,17 +60,37 @@ cge_lin <- function(FT, FC, dT = NULL, dC = NULL, gen, eps = 1e-10) {
   v <- cl(1 - FT0[, -(m + 1), drop = FALSE] - FC)      # S_TC(t_{i-1}) - dCIF_{i,C}
   p <- gen$phi
   Lam <- 0.5 * p(Stc) + 0.5 * col_cumsum(p(u) - p(v))  # phi(S_hat(t_j))
-  D   <- p(Stc) - p(u) - p(v) + p(Stc_prev)            # band width increments (>= 0)
+  D   <- p(Stc) - p(u) - p(v) + p(Stc_prev)            # band width increments
+  # true D_i >= 0; D < 0 is estimation noise (non-monotone CIF estimates).
+  # Clamp (slightly conservative band); the midpoint Lam does not involve D.
+  D_neg <- D < 0
+  D   <- pmax(D, 0)
   hw  <- 0.5 * col_cumsum(D)                           # half-width on phi-scale
   S   <- gen$phi_inv(Lam)
-  out <- list(S = S, lwr = gen$phi_inv(Lam + hw), upr = gen$phi_inv(Lam - hw))
+  out <- list(S = S, lwr = gen$phi_inv(Lam + hw), upr = gen$phi_inv(Lam - hw),
+              D_clamped = D_neg)
   if (!is.null(dT)) {
     dp <- gen$dphi
     dT0 <- cbind(0, dT); dC0 <- cbind(0, dC)
-    term_u <- dp(u) * (dT + dC0[, -(m + 1), drop = FALSE])
-    term_v <- dp(v) * (dT0[, -(m + 1), drop = FALSE] + dC)
+    dT_prev <- dT0[, -(m + 1), drop = FALSE]; dC_prev <- dC0[, -(m + 1), drop = FALSE]
+    term_u <- dp(u) * (dT + dC_prev)
+    term_v <- dp(v) * (dT_prev + dC)
     dLam <- -0.5 * dp(Stc) * (dT + dC) - 0.5 * col_cumsum(term_u - term_v)
     out$dS <- dLam / dp(S)
+    # linearizations of the band endpoints lwr = phi_inv(Lam + hw),
+    # upr = phi_inv(Lam - hw) (cl() clipping ignored, as for dS)
+    dStc      <- -(dT + dC)
+    dStc_prev <- -(dT_prev + dC_prev)
+    du        <- -(dT + dC_prev)
+    dv        <- -(dT_prev + dC)
+    dD <- dp(Stc) * dStc - dp(u) * du - dp(v) * dv + dp(Stc_prev) * dStc_prev
+    if (any(D_neg)) {                      # subgradient 0 where D is clamped
+      Dn <- if (nrow(D_neg) == nrow(dD)) D_neg else D_neg[rep(1, nrow(dD)), , drop = FALSE]
+      dD[Dn] <- 0
+    }
+    dhw <- 0.5 * col_cumsum(dD)
+    out$dlwr <- (dLam + dhw) / dp(out$lwr)
+    out$dupr <- (dLam - dhw) / dp(out$upr)
   }
   out
 }
