@@ -50,7 +50,7 @@ pred_xgb_surv <- function(xgb, df_test, intervention = NULL, X = "X") {
 
 cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest, 
                            martingale_debias, modify_S, modify_G, dgm, 
-                           cache_file = NULL, ...) {
+                           cache_file = NULL, modify_P = NULL, ...) {
   
   if (!is.null(cache_file) && file.exists(cache_file)) {
     message("Loading cached cross-fit from ", cache_file)
@@ -73,6 +73,8 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
     return(list(px_z = list(1-px, px), px_zw = list(1-px, px)))
   }
   
+  if (!is.null(modify_P)) assert_that(identical(modify_P, "corrupt"))
+
   # determine if the setting is competing risks
   is_cr <- if (!all(data[[event_var]] %in% c(0, 1))) TRUE else FALSE
   nlvls <- max(data[[event_var]])
@@ -149,6 +151,14 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
       pmax(fn(tgrid), 1e-6)
     }
 
+    # marginal Aalen-Johansen CIFs, m x nlvls (right-continuous, on tgrid)
+    aj_eval <- function(times, events, tgrid, nlvls) {
+      ev <- factor(events, levels = 0:nlvls)
+      sf <- summary(survival::survfit(survival::Surv(times, ev) ~ 1),
+                    times = tgrid, extend = TRUE)
+      matrix(sf$pstate[, 1 + seq_len(nlvls)], ncol = nlvls)
+    }
+
     # oracle S(t | X,Z,W) / CIF_k(t | X,Z,W), and their counterfactuals
     # under X:=x (unit's own factual Z,W throughout, only X intervened)
     if (is_cr) {
@@ -204,7 +214,24 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
       n_tst <- sum(tst)
       n_val <- sum(val)
       
-      if (identical(modify_S, "corrupt")) {
+      if (identical(modify_S, "corrupt") && is_cr) {
+
+        # marginal Aalen-Johansen CIFs on dev (covariates ignored), CR analogue
+        # of the marginal KM corruption below
+        aj_cif <- aj_eval(data[[time_var]][dev], data[[event_var]][dev], tgrid, nlvls)
+        Ct <- aperm(array(aj_cif, c(length(tgrid), nlvls, n_tst)), c(3, 1, 2))
+        Cv <- aperm(array(aj_cif, c(length(tgrid), nlvls, n_val)), c(3, 1, 2))
+        s_vec <- pmax(1 - rowSums(aj_cif), 1e-6)
+        Mt <- matrix(s_vec, n_tst, length(tgrid), byrow = TRUE)
+
+        s_xzw_mod[[i]]$srv_tst <- Mt
+        s_xzw_mod[[i]]$cif_tst <- Ct
+        s_xzw_mod[[i]]$cifx0_tst <- Ct
+        s_xzw_mod[[i]]$cifx1_tst <- Ct
+        s_xzw_mod[[i]]$cifx0_val <- Cv
+        s_xzw_mod[[i]]$cifx1_val <- Cv
+
+      } else if (identical(modify_S, "corrupt")) {
         
         s_vec <- km_eval(data[[time_var]][dev], data[[event_var]][dev], tgrid)
         Mt <- matrix(s_vec, n_tst, length(tgrid), byrow = TRUE)
@@ -236,7 +263,9 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
       
       if (identical(modify_G, "corrupt")) {
         
-        g_vec <- km_eval(data[[time_var]][dev], 1L - data[[event_var]][dev], tgrid)
+        # censoring indicator (event == 0); identical to 1 - event for NIC
+        g_vec <- km_eval(data[[time_var]][dev],
+                         as.integer(data[[event_var]][dev] == 0L), tgrid)
         Mt <- matrix(g_vec, n_tst, length(tgrid), byrow = TRUE)
         Ht <- matrix(-log(g_vec), n_tst, length(tgrid), byrow = TRUE)
         
@@ -367,6 +396,14 @@ cross_fit_surv <- function(data, X, Z, W, time_var, event_var, time_interest,
       
       px_z[[1 + 0]][tst] <- 1 - mean(x)
       px_z[[1 + 1]][tst] <- mean(x)
+    }
+
+    # misspecified propensities (opt-in, synthetic robustness arms): replace
+    # P(x | z) and P(x | z, w) by the marginal P(x) of the dev fold
+    if (identical(modify_P, "corrupt")) {
+      p_bar <- mean(x[dev])
+      px_z[[1]][tst] <- px_zw[[1]][tst] <- 1 - p_bar
+      px_z[[2]][tst] <- px_zw[[2]][tst] <- p_bar
     }
     
     # if (true_nuiss) next
@@ -566,7 +603,7 @@ route2_cge <- function(pso, eff, tgrid, gen, jT, jC, tau) {
     id_hi <- cells[[k1]]$upr_id - cells[[k2]]$lwr_id
     se_lo <- se_of(cells[[k1]]$dlwr - cells[[k2]]$dupr)
     se_hi <- se_of(cells[[k1]]$dupr - cells[[k2]]$dlwr)
-    # Route II: lwr/upr = partial-ID CI; other routes: midpoint CI
+    # Route I/II: lwr/upr = partial-ID CI; envelope: midpoint CI
     res <- rbind(res, data.frame(effect = e$nm, value = val, sd = sd,
                                  lwr = id_lo - 1.96 * se_lo,
                                  upr = id_hi + 1.96 * se_hi,
@@ -588,7 +625,8 @@ route2_cge <- function(pso, eff, tgrid, gen, jT, jC, tau) {
   list(res = res, band = band)
 }
 
-route1_cge <- function(cfit, data, X, Z, W, eff, gen, jT, jC, extrm_idx, tau, ...) {
+route1_cge <- function(cfit, data, X, Z, W, eff, gen, jT, jC, extrm_idx, tau,
+                       r1_cap = 10, ...) {
   tgrid <- cfit$tgrid; m <- length(tgrid); n <- nrow(data); x <- data[[X]]
   getmat <- function(lst_t, j) sapply(seq_len(m), function(t) lst_t[[t]][[j]])  # n x m
   FTx <- lapply(1:2, function(a) getmat(cfit$y_xzw[[a]], jT))  # [[xy+1]]: CIF_T(t | x_y, Z_i, W_i)
@@ -599,43 +637,84 @@ route1_cge <- function(cfit, data, X, Z, W, eff, gen, jT, jC, extrm_idx, tau, ..
   FT_f <- FTx[[1]]; FT_f[x == 1, ] <- FTx[[2]][x == 1, ]
   FC_f <- FCx[[1]]; FC_f[x == 1, ] <- FCx[[2]][x == 1, ]
   cg_f <- cge_lin(FT_f, FC_f, HT - FT_f, HC - FC_f, gen)
-  ria_new <- cg_f$S + cg_f$dS                                   # Phi(factual) + lin
-  Phi <- lapply(1:2, function(a) cge_lin(FTx[[a]], FCx[[a]], gen = gen)$S)  # [[xy+1]]
-
-  # nested regressions nu_{xy,xw}(Z) = E[Phi(x_y) | X = x_w, Z], refit on Phi
-  ey_new <- lapply(1:2, function(a) lapply(1:2, function(b) matrix(NA_real_, n, m)))
-  for (i in seq_along(cfit$fld_lst)) {
-    val <- cfit$fld_lst[[i]]$val; tst <- cfit$fld_lst[[i]]$tst
-    for (xy in 0:1) {
-      A <- cfit$s_xzw_mod[[i]][[paste0("cifx", xy, "_val")]]   # n_val x m x nlvls
-      Phi_val <- cge_lin(matrix(A[, , jT], ncol = m), matrix(A[, , jC], ncol = m), gen = gen)$S
-      for (t in seq_len(m)) {
-        mod <- cv_xgb_surv(data[val, c(X, Z), with = FALSE], Phi_val[, t], ...)
-        for (xw in 0:1)
-          ey_new[[xw+1]][[xy+1]][tst, t] <-
-            pred_xgb_surv(mod, data[tst, c(X, Z), with = FALSE], intervention = xw, X = X)
-      }
+  # Stabilization (r1_cap = c > 0, default 10): the unit-level copula-graphic map
+  # is ill-conditioned where S(t | x, z, w) ~ 1 while S_TC is much lower (strong
+  # dependence): dS = dLam / phi'(S) with phi'(S) ~ 0, and a handful of units get
+  # linear corrections of order 1e3 although the exact map moves S by < 1.
+  # The unit-level corrections dS, dlwr, dupr are winsorized at +-c (analogous to
+  # propensity clipping; the estimand is unchanged). r1_cap = NULL disables it.
+  # The number of capped units is reported in columns n_capped_S / n_capped_band.
+  n_capped <- c(S = 0L, lwr = 0L, upr = 0L)
+  if (!is.null(r1_cap)) {
+    stopifnot(is.numeric(r1_cap), length(r1_cap) == 1, r1_cap > 0)
+    for (k in c("dS", "dlwr", "dupr")) {
+      big <- abs(cg_f[[k]]) > r1_cap
+      big[is.na(big)] <- FALSE
+      n_capped[sub("^d", "", k)] <- sum(rowSums(big) > 0)
+      cg_f[[k]][big] <- sign(cg_f[[k]][big]) * r1_cap
     }
   }
-
   tolist <- function(M) lapply(seq_len(m), function(t) M[, t])
-  cfit_I <- list(
-    ria = tolist(ria_new),
-    y_xzw = lapply(1:2, function(a) tolist(Phi[[a]])),
-    y_xzw_ora = NULL,
-    px_z = cfit$px_z, px_zw = cfit$px_zw,
-    ey_nest = lapply(1:2, function(a) lapply(1:2, function(b) tolist(ey_new[[a]][[b]]))),
-    ey_nest_ora = NULL, ora_px_z = NULL, ora_px_zw = NULL, ora_nu = NULL,
-    tgrid = tgrid, is_cr = FALSE, nlvls = 1,
-    tres = replicate(m, rep(NA, n), simplify = FALSE)
-  )
-  pso_I <- pso_diff_surv(cfit_I, data, X, Z, W, NULL, NULL)
-  for (xz in 0:1) for (xw in 0:1) for (xy in 0:1) for (t in seq_len(m))
-    pso_I[[xz+1]][[xw+1]][[xy+1]][[t]][extrm_idx] <- NA
-  pso_I <- recentre_pso(pso_I, x, tgrid, FALSE, 1)
 
+  # The chain-rule pipeline is run once per band component: the midpoint
+  # ("S", as before) and the two identified-set endpoints ("lwr", "upr").
+  # psi is linear in S(t | x, z, w), so averaging conditional bounds bounds psi.
+  # The midpoint runs first and in the original order, so value/sd (and the
+  # RNG stream of its nested fits) are unchanged.
+  run_comp <- function(comp, dcomp) {
+    ria_new <- cg_f[[comp]] + cg_f[[dcomp]]                     # Phi(factual) + lin
+    Phi <- lapply(1:2, function(a) cge_lin(FTx[[a]], FCx[[a]], gen = gen)[[comp]])
+
+    # nested regressions nu_{xy,xw}(Z) = E[Phi(x_y) | X = x_w, Z], refit on Phi
+    ey_new <- lapply(1:2, function(a) lapply(1:2, function(b) matrix(NA_real_, n, m)))
+    for (i in seq_along(cfit$fld_lst)) {
+      val <- cfit$fld_lst[[i]]$val; tst <- cfit$fld_lst[[i]]$tst
+      for (xy in 0:1) {
+        A <- cfit$s_xzw_mod[[i]][[paste0("cifx", xy, "_val")]]   # n_val x m x nlvls
+        Phi_val <- cge_lin(matrix(A[, , jT], ncol = m), matrix(A[, , jC], ncol = m),
+                           gen = gen)[[comp]]
+        for (t in seq_len(m)) {
+          mod <- cv_xgb_surv(data[val, c(X, Z), with = FALSE], Phi_val[, t], ...)
+          for (xw in 0:1)
+            ey_new[[xw+1]][[xy+1]][tst, t] <-
+              pred_xgb_surv(mod, data[tst, c(X, Z), with = FALSE], intervention = xw, X = X)
+        }
+      }
+    }
+
+    cfit_I <- list(
+      ria = tolist(ria_new),
+      y_xzw = lapply(1:2, function(a) tolist(Phi[[a]])),
+      y_xzw_ora = NULL,
+      px_z = cfit$px_z, px_zw = cfit$px_zw,
+      ey_nest = lapply(1:2, function(a) lapply(1:2, function(b) tolist(ey_new[[a]][[b]]))),
+      ey_nest_ora = NULL, ora_px_z = NULL, ora_px_zw = NULL, ora_nu = NULL,
+      tgrid = tgrid, is_cr = FALSE, nlvls = 1,
+      tres = replicate(m, rep(NA, n), simplify = FALSE)
+    )
+    pso_I <- pso_diff_surv(cfit_I, data, X, Z, W, NULL, NULL)
+    for (xz in 0:1) for (xw in 0:1) for (xy in 0:1) for (t in seq_len(m))
+      pso_I[[xz+1]][[xw+1]][[xy+1]][[t]][extrm_idx] <- NA
+    recentre_pso(pso_I, x, tgrid, FALSE, 1)
+  }
+  pso_I <- run_comp("S", "dS")
+  # endpoint runs must not shift the RNG stream seen by later fits (later tau,
+  # other routes), so the state after the midpoint run is restored afterwards
+  rng_state <- if (exists(".Random.seed", envir = globalenv()))
+    get(".Random.seed", envir = globalenv()) else NULL
+  pso_L <- run_comp("lwr", "dlwr")
+  pso_U <- run_comp("upr", "dupr")
+  if (!is.null(rng_state)) assign(".Random.seed", rng_state, envir = globalenv())
+
+  cell <- function(p, sp, t) p[[sp[1]+1]][[sp[2]+1]][[sp[3]+1]][[t]]
+  mn_se <- function(po) {
+    po[extrm_idx] <- NA
+    c(mean(po, na.rm = TRUE), sqrt(var(po, na.rm = TRUE) / sum(!is.na(po))))
+  }
   res <- c()
   for (e in eff) for (t in seq_len(m)) {
+    stopifnot(identical(e$sgn, c(1, -1)))
+    k1 <- e$spc[[1]]; k2 <- e$spc[[2]]
     po <- 0
     for (s in seq_along(e$sgn)) {
       sp <- e$spc[[s]]
@@ -644,9 +723,20 @@ route1_cge <- function(cfit, data, X, Z, W, eff, gen, jT, jC, extrm_idx, tau, ..
     po[extrm_idx] <- NA
     val <- mean(po, na.rm = TRUE)
     sd  <- sqrt(var(po, na.rm = TRUE) / sum(!is.na(po)))
+    # identified set for P_k1 - P_k2: [L_k1 - U_k2, U_k1 - L_k2]
+    lo <- mn_se(cell(pso_L, k1, t) - cell(pso_U, k2, t))
+    hi <- mn_se(cell(pso_U, k1, t) - cell(pso_L, k2, t))
+    # Route I/II: lwr/upr = partial-ID CI; envelope: midpoint CI
     res <- rbind(res, data.frame(effect = e$nm, value = val, sd = sd,
-                                 lwr = val - 1.96 * sd, upr = val + 1.96 * sd,
+                                 lwr = lo[1] - 1.96 * lo[2], upr = hi[1] + 1.96 * hi[2],
+                                 id_lo = lo[1], id_hi = hi[1], se_lo = lo[2], se_hi = hi[2],
+                                 lwr_mid = val - 1.96 * sd, upr_mid = val + 1.96 * sd,
                                  tau = tau, time_interest = tgrid[t]))
+  }
+  if (!is.null(r1_cap)) {
+    res$r1_cap <- r1_cap
+    res$n_capped_S <- n_capped[["S"]]
+    res$n_capped_band <- max(n_capped[["lwr"]], n_capped[["upr"]])
   }
   res
 }
@@ -681,14 +771,15 @@ one_step_debias_surv <- function(data, X, Z, W, time_var, event_var,
                                  time_interest = NULL, eps_trim = 0, 
                                  copula = NULL, tau_grid = 0, 
                                  martingale_debias = TRUE, 
-                                 modify_S = NULL, modify_G = NULL, 
+                                 modify_S = NULL, modify_G = NULL, modify_P = NULL, 
                                  dgm = NULL, cache_file = NULL, 
-                                 route = "envelope", target_cause = 1L, ...) {
+                                 route = "envelope", target_cause = 1L,
+                                 r1_cap = 10, ...) {
   
   assert_that(all(route %in% c("envelope", "II", "I")))
   cfit <- cross_fit_surv(data, X, Z, W, time_var, event_var, time_interest, 
                          martingale_debias, modify_S, modify_G, dgm, 
-                         cache_file = cache_file, ...)
+                         cache_file = cache_file, modify_P = modify_P, ...)
   pso <- pso_diff_surv(cfit, data, X, Z, W, time_var, event_var, ...)
   
   # get extreme propensity weights
@@ -829,7 +920,8 @@ one_step_debias_surv <- function(data, X, Z, W, time_var, event_var,
         band_sens <- rbindlist(list(band_sens, r2$band), fill = TRUE)
       }
       if ("I" %in% route) {
-        r1 <- route1_cge(cfit, data, X, Z, W, eff, gen, jT, jC, extrm_idx, tau, ...)
+        r1 <- route1_cge(cfit, data, X, Z, W, eff, gen, jT, jC, extrm_idx, tau,
+                         r1_cap = r1_cap, ...)
         res_sens <- rbindlist(list(res_sens, cbind(r1, route = "I")), fill = TRUE)
       }
     }
