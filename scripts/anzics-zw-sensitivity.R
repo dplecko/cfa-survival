@@ -2,12 +2,14 @@
 root <- rprojroot::find_root(rprojroot::has_file(".gitignore"))
 invisible(lapply(list.files(file.path(root, "r"), full.names = TRUE), source))
 
-res_dir <- file.path(root, "results", "sensitivity")
+# Z/W split sensitivity for death (ANZICS appendix figure). Inputs: tasks 1,
+# 12 and 13 of scripts/anzics-survival.R (seed 2026).
+res_dir <- file.path(root, "results", "anzics")
 
 files <- c(
-  classic   = "death_classic.RData",
-  irsad_med = "death_irsad_med.RData",
-  clin_med  = "death_clin_med.RData"
+  classic   = "death_classic_seed2026.RData",
+  irsad_med = "death_irsad_med_seed2026.RData",
+  clin_med  = "death_clin_med_seed2026.RData"
 )
 
 labs <- c(
