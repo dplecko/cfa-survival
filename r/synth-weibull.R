@@ -98,7 +98,7 @@ gen_surv_weibull <- function(n, k=3, pz=3, q=2,
                      # C params (indep Weibull-PH) with different coefs
                      C_par = list(mu0=-0.4, muX=0.15, muZ=rnorm(pz,0,0.1),
                                   muW=rnorm(q,-0.1,0.1), shape=1.2, scale=1),
-                     T2_par = NULL,
+                     T2_par = NULL, copula_tau = NULL,
                      pW = NULL,
                      seed = NULL) {
   if(!is.null(seed)) set.seed(seed)
@@ -135,7 +135,18 @@ gen_surv_weibull <- function(n, k=3, pz=3, q=2,
   }
 
   etaT1 <- mk_mu(X, Z, W, T_par)
-  T1 <- rwb(etaT1, T_par)
+  if (is.null(copula_tau)) {
+    T1 <- rwb(etaT1, T_par)
+  } else {
+    # informative censoring (opt-in): latent T1, T2 keep their conditional
+    # Weibull margins but are coupled by a Frank copula given (X, Z, W):
+    # (U1, U2) ~ Frank(tau), T_j = S_j^{-1}(U_j | X, Z, W), E_j = -log U_j
+    stopifnot(!is.null(T2_par))
+    U12 <- VineCopula::BiCopSim(length(etaT1), family = 5,
+                                par = cge_tau_to_theta("frank", copula_tau))
+    E12 <- -log(U12)
+    T1 <- T_par$scale * (E12[, 1] * exp(-etaT1))^(1 / T_par$shape)
+  }
 
   etaC <- mk_mu(X, Z, W, C_par)
   C <- rwb(etaC, C_par)
@@ -155,7 +166,8 @@ gen_surv_weibull <- function(n, k=3, pz=3, q=2,
   } else {
 
     etaT2 <- mk_mu(X, Z, W, T2_par)
-    T2 <- rwb(etaT2, T2_par)
+    T2 <- if (is.null(copula_tau)) rwb(etaT2, T2_par) else
+      T2_par$scale * (E12[, 2] * exp(-etaT2))^(1 / T2_par$shape)
 
     M <- pmin(T1, T2, C)
 
@@ -174,7 +186,7 @@ gen_surv_weibull <- function(n, k=3, pz=3, q=2,
 
   out <- list(data=df,
        par=list(T=T_par, T2=T2_par, C=C_par, A=A, beta=beta, alpha=alpha, B=B,
-                SigU=SigU, sZ=sZ, sW=sW, pW=pW),
+                SigU=SigU, sZ=sZ, sW=sW, pW=pW, copula_tau=copula_tau),
        cfW = list(Wx0=Wx0, Wx1=Wx1))
   class(out) <- c("dgm_weibull", class(out))
   out
